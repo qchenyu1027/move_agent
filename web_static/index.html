@@ -1,0 +1,13 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Move Agent · 实时控制台</title><link rel="stylesheet" href="/styles.css"></head>
+<body><main class="shell">
+  <header><div><span class="kicker">LIVE VIRTUAL ENVIRONMENT</span><h1>Move Agent <em>Playground</em></h1></div><div class="online"><i></i><span>环境在线</span></div></header>
+  <section class="layout">
+    <div class="stage-card"><div class="card-head"><span>ARENA / GRID-12×8</span><span id="episode">EPISODE 001</span></div><div id="board" class="board" aria-label="虚拟小球游戏场"></div><div class="legend"><span><b class="ball"></b>智能体</span><span><b class="goal"></b>目标</span><span><b class="wall"></b>障碍</span></div></div>
+    <aside>
+      <section class="panel metrics"><div><strong id="score">0</strong><small>SCORE</small></div><div><strong id="steps">0</strong><small>STEPS</small></div><div><strong id="position">1,6</strong><small>POSITION</small></div></section>
+      <section class="panel command"><label for="prompt">给智能体下达任务</label><textarea id="prompt" rows="3">观察游戏，把小球移动到终点</textarea><button id="run" class="run">启动智能体 <span>→</span></button><p id="agentText">等待任务</p></section>
+      <section class="panel"><div class="panel-title"><span>手动控制</span><button id="reset" class="text-btn">重置</button></div><div class="dpad"><button data-dir="up">↑</button><button data-dir="left">←</button><button data-dir="down">↓</button><button data-dir="right">→</button></div><p class="tip">支持方向键与 WASD；智能体运行期间手动控制锁定。</p></section>
+      <section class="panel events"><div class="panel-title"><span>实时动作流</span><span id="phase" class="badge">READY</span></div><ol id="events"></ol></section>
+    </aside>
+  </section>
+</main><script type="module" src="/app.js"></script></body></html>
