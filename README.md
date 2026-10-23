@@ -214,6 +214,8 @@ python3 -m pytest -q tests/test_robot_client.py
 
 测试使用模拟 HTTP 响应，不会触发真实机器人动作。若不使用 Conda，可通过 `python3 -m pip install -r requirements-dev.txt` 安装测试依赖。
 
+`robot_server/`（机器人端服务）的测试是独立的 unittest，需在该目录下运行，见 [robot_server/README.md](robot_server/README.md)；根目录的 `pytest.ini` 已把 `pytest` 限定为 `tests/`，不会收集它。
+
 ## 目录结构
 
 ```text
@@ -225,6 +227,7 @@ move_agent/
 ├── harness/               # LLM 与工具调用循环
 ├── robot/                 # 虚拟与真机客户端
 ├── tools/                 # 提供给 LLM 的工具
+├── robot_server/          # 机器人端 FastAPI 服务与 move/grasp 工具（需在该目录下运行）
 ├── web_static/            # 网页前端
 ├── tests/                 # 自动测试
 ├── scripts/               # 启动与连接检查脚本

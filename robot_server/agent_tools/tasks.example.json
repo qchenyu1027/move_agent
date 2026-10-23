@@ -1,0 +1,5 @@
+[
+  {"tool": "move", "pose_ids": [3],  "options": {"speed-m-s": 0.06,       "position-tolerance-m": 0.070}},
+  {"tool": "grasp", "tag_id": 5,     "grasp_and_lift": true, "options": {"offset-config": "tag5_left_tool_offset.yaml"}}
+]
+
