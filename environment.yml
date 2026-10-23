@@ -1,0 +1,8 @@
+name: move_agent
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - pytest>=7,<9
