@@ -68,12 +68,25 @@ class AgentToolsApiTest(unittest.IsolatedAsyncioTestCase):
         run.assert_not_called()
 
     async def test_grasp_failure_reports_exit_code(self):
-        with patch('agent_tools.api.TaskScheduler.run', return_value=3):
+        with patch('agent_tools.api.TaskScheduler.run', return_value=3) as run:
             response = await self.client.post('/grasp', headers=self.headers,
                                               json={'tag_id': 5})
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()['exit_code'], 3)
         self.assertFalse(response.json()['ok'])
+        run.assert_called_once_with([{
+            'tag_id': 5, 'grasp_and_lift': True, 'tool': 'grasp',
+        }], execute=True)
+
+    async def test_grasp_can_explicitly_request_full_flow(self):
+        with patch('agent_tools.api.TaskScheduler.run', return_value=0) as run:
+            response = await self.client.post(
+                '/grasp', headers=self.headers,
+                json={'tag_id': 5, 'grasp_and_lift': False})
+        self.assertEqual(response.status_code, 200)
+        run.assert_called_once_with([{
+            'tag_id': 5, 'grasp_and_lift': False, 'tool': 'grasp',
+        }], execute=True)
 
     async def test_plan_validation_prevents_any_action(self):
         tasks = [{'tool': 'move', 'fixed': True}, {'tool': 'move', 'pose_ids': [4]}]

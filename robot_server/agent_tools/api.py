@@ -227,8 +227,16 @@ def create_app(api_key=None):
 
     @app.post('/grasp', dependencies=[Depends(authorize)])
     async def grasp(request: FastAPIRequest, body: dict | None = None):
-        task = {**(body or {}), 'tool': 'grasp'}
-        return await execute([task], '抓放流程已完成', request)
+        # 远程单次抓取默认只抓住并抬起，避免意外进入完整抓放流程。
+        payload = body or {}
+        task = {
+            **payload,
+            'grasp_and_lift': payload.get('grasp_and_lift', True),
+            'tool': 'grasp',
+        }
+        message = ('抓取并抬起已完成'
+                   if task['grasp_and_lift'] else '完整抓放流程已完成')
+        return await execute([task], message, request)
 
     @app.post('/tasks', dependencies=[Depends(authorize)])
     async def run_tasks(request: FastAPIRequest, tasks: list = Body(...)):

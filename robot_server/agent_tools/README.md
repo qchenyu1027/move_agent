@@ -2,7 +2,7 @@
 
 调度器位于 `agent_tools/scheduler.py`；工具位于 `tools/move_tool.py` 和
 `tools/grasp_tool.py`。工具调用的控制脚本及其数据统一放在 `tools/scripts/`，
-不依赖 `robot_server/` 之外的文件。使用 Python 标准库，无新增依赖。
+不依赖项目根目录下的其他文件。使用 Python 标准库，无新增依赖。
 
 | 目录 | 内容 |
 | --- | --- |
@@ -10,13 +10,14 @@
 | `tools/` | move / grasp 工具封装、参数校验与控制进程管理 |
 | `tools/scripts/` | 只放动作运行所需文件：底盘移动 `base_move_world.py`、`base_move_world_pose_list.py`；AprilTag 抓取 `apriltag_left_tool_grasp_test.py`（自包含单文件：已合并 Tag 识别与目标位姿、左手 QP 控制两部分，不再依赖同目录其他脚本）；抓取数据 `tag3/tag5_left_tool_offset.yaml`、`left_tool_joint_snapshot_20261010.yaml` |
 
-`tools/scripts/` 中的脚本和数据是机器人端控制脚本的独立副本，路径均相对自身所在目录。
-tag 偏移的标定工具 `measure_tag_to_left_tool_offset.py` 不在本目录中；重新标定后，
-需要把新的 yaml 放进 `tools/scripts/`（标定时用 `--output` 直接写到这里也可以）。
+`tools/scripts/` 中是从项目根目录复制、并把路径改为相对自身目录的独立副本；根目录原文件保持不变，
+工具不再调用它们。两边之后各自修改不会自动同步：用根目录的 `measure_tag_to_left_tool_offset.py`
+重新标定后，需要把新的 yaml 复制到 `tools/scripts/`，或在项目根目录标定时加
+`--output tools/scripts/tag5_left_tool_offset.yaml` 直接写入。
 
 ## 运行
 
-在 `robot_server/` 目录下预览任务（不加载 ROS、不访问机器人）：
+在项目根目录预览任务（不加载 ROS、不访问机器人）：
 
 ```bash
 python3 -B -m agent_tools.scheduler agent_tools/tasks.example.json
@@ -29,7 +30,7 @@ source /home/liuqian/WBC/Apex_Deploy/apex_ros_env.sh
 python3 -B -m agent_tools.scheduler agent_tools/tasks.example.json --execute
 ```
 
-也支持用脚本绝对路径运行：`python3 <robot_server 绝对路径>/agent_tools/scheduler.py <任务文件绝对路径>`。
+也支持 `python3 /home/liuqian/copy/test/agent_tools/scheduler.py <任务文件绝对路径>`。
 控制脚本统一以 `tools/scripts/` 为工作目录运行；`options` 中的相对文件路径
 （如 `offset-config`）以该目录为基准。任务文件路径相对于启动调度器时的工作目录。
 
@@ -69,9 +70,10 @@ move 支持原脚本的速度、容差、超时、定位等待、重试和 `vlah
 稳定窗口和底盘回位等参数。完整支持列表见工具文件中的 `MOVE_OPTIONS` / `GRASP_OPTIONS`。
 调度器管理执行开关，任务中不能传入 `execute`、`help`、`check-only` 等改变任务语义的选项。
 
-默认 `grasp` 会抓取、返回快照位姿、底盘右移、松爪放置、抬升、底盘回位并回 home。
-如果只需要抓取并抬手，使用 `"grasp_and_lift": true`：它会识别 Tag、接近、闭合夹爪、
+直接调用 HTTP `/grasp` 时默认使用 `"grasp_and_lift": true`：它会识别 Tag、接近、闭合夹爪、
 保持夹爪闭合并抬升 50 mm，然后成功结束；不会移动底盘、松爪、返回快照位姿或调用 go_home。
+只有在 `/tasks` 中显式写入 `"grasp_and_lift": false`，才执行完整的抓放、底盘移动、松爪、
+回位和 Home 流程。
 修改 `tag_id` 时需要同时选择对应的 `offset-config`；不会自动切换标定偏移。
 
 ## Python 调用与失败处理
@@ -92,7 +94,7 @@ scheduler.run(tasks)                # 仅预览
 退出码 0 表示计划成功或预览成功；非零表示失败，后续任务不执行，不自动重试整个任务。
 Ctrl-C 时通知当前控制脚本中断，等待其停止和清理后退出 130。
 
-离线验证（在 `robot_server/` 目录下执行）：
+离线验证（在项目根目录执行）：
 
 ```bash
 python3 -B -m unittest -v agent_tools.test_agent_tools agent_tools.test_base_move_world
@@ -149,7 +151,8 @@ curl -X POST -H "X-API-Key: $ROBOT_API_KEY" http://ROBOT_IP:8000/cancel
 
 `POST /move` 不带请求体时执行 `base_move_world.py` 的内置固定目标；也可提供
 `{"pose_ids":[1]}` 或 `{"pose":[x,y,z,qx,qy,qz,qw]}`。`POST /grasp` 不带请求体
-时使用现有工具的默认 `tag_id=5`。两者均可传 `options`，字段与上文任务格式相同。
+时使用默认 `tag_id=5`，并只抓取后抬升 50 mm。若明确需要完整抓放流程，必须传
+`{"grasp_and_lift":false}`。两者均可传 `options`，字段与上文任务格式相同。
 `POST /tasks` 接收完整的非空任务数组，执行前校验整个计划。
 
 `GET /health` 汇总 VLAHost HTTP/ROS 反馈、世界位姿新鲜度、关键 ROS

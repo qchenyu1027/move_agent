@@ -93,7 +93,7 @@ pose-ready-timeout-s, pose-stable-s, odometry-retries
 
 `pose_ids` 还支持 `pause-s`。
 
-### AprilTag 抓放
+### AprilTag 抓取并抬起
 
 ```http
 POST /grasp
@@ -103,7 +103,15 @@ Content-Type: application/json
 {"tag_id":5,"options":{"offset-config":"tag5_left_tool_offset.yaml"}}
 ```
 
-这不是单纯闭爪：成功响应表示抓取、返回快照位姿、底盘右移、放置、抬升、底盘回位和 Home 全部完成。修改 `tag_id` 时必须由任务配置同时给出匹配的 `offset-config`；LLM 不得猜测标定文件。
+`/grasp` 默认等价于 `grasp_and_lift=true`：成功响应表示 Tag 已抓住并抬升 50 mm，
+夹爪保持闭合；不会移动底盘、松爪、返回快照位姿或调用 Home。修改 `tag_id` 时必须由任务配置
+同时给出匹配的 `offset-config`；LLM 不得猜测标定文件。
+
+只有明确需要完整抓放流程时才传：
+
+```json
+{"tag_id":5,"grasp_and_lift":false,"options":{"offset-config":"tag5_left_tool_offset.yaml"}}
+```
 
 ### 串行任务计划
 
@@ -179,4 +187,3 @@ with httpx.Client(base_url=base_url, headers=headers, trust_env=False) as client
 ## 服务端运维信息
 
 服务运行在机器人电脑 `/home/liuqian/copy/test`，启动入口为 `agent_tools/start_api.sh`，日志为 `agent_tools/api.log`。密钥配置位于 `/home/liuqian/.config/robot-agent-tools/api.env`，权限应为 600。LLM 调用端不应读取或修改这些服务端文件。
-
