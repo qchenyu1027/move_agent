@@ -4,7 +4,6 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="${MOVE_AGENT_HOST:-0.0.0.0}"
 PORT="${MOVE_AGENT_PORT:-8080}"
-MAX_STEPS="${MOVE_AGENT_MAX_STEPS:-40}"
 
 export ROBOT_API_BASE="${ROBOT_API_BASE:-http://10.121.40.94:8000}"
 export ROBOT_HEALTH_TIMEOUT_S="${ROBOT_HEALTH_TIMEOUT_S:-15}"
@@ -21,8 +20,4 @@ if [[ -z "${ROBOT_API_KEY:-}" ]]; then
 fi
 
 cd "$PROJECT_DIR"
-exec python3 app.py \
-  --mode robot \
-  --host "$HOST" \
-  --port "$PORT" \
-  --max-steps "$MAX_STEPS"
+exec python3 app.py --host "$HOST" --port "$PORT"

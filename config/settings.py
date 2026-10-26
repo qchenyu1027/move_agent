@@ -3,7 +3,6 @@ import os
 
 DEFAULT_BASE_URL = "http://10.121.40.31:8000/v1"
 DEFAULT_MODEL = "Qwen3.5-9B"
-DEFAULT_MAX_STEPS = 40
 RUNS_DIR = "runs"
 
 
