@@ -8,6 +8,7 @@
 Base URL: http://6.6.7.101:8000
 健康检查: GET /health（无需鉴权）
 动作接口: POST /move、/move_xy、/grasp、/eef_delta、/tasks、/cancel
+视觉接口: GET /vision/bottles（需要鉴权，只读）
 鉴权请求头: X-API-Key: <ROBOT_API_KEY>
 Content-Type: application/json
 ```
@@ -161,7 +162,9 @@ Content-Type: application/json
 ```
 
 `side` 必须是 `left` 或 `right`；三个位移字段都必须提供，且不能全部为零。
-它不是键盘遥操，也不接受连续轨迹；调用前仍必须通过 `/health` 的运动准入检查。
+它不是键盘遥操，也不接受连续轨迹；机器人端不会调用 `arm_teleop.py`，而是按 RPent
+逻辑校验 `/hil/snapshot`、本地 TF、VLAHost 路由和未选中 EEF 保持，并通过
+`/action_chunk` 发送 10 帧绝对双臂 EEF 目标。调用前仍必须通过 `/health` 的运动准入检查。
 
 ### 串行任务计划
 
@@ -198,6 +201,37 @@ HTTP 202 表示已提出取消请求，不表示机器人已经停止清理。�
 | 422 | JSON 结构、字段、目标或选项无效 | 修正调用参数；不得让 LLM猜机器人标定值 |
 | 500 | 控制脚本启动或执行失败 | 停止后续任务，报告 `exit_code` |
 | 503 | 机器人前置健康检查未通过 | 不会启动动作；返回并报告 `health` |
+
+## 当前瓶子视觉快照
+
+`GET /vision/bottles?prompt=water%20bottle` 通过机器人 API 代理到本机
+F2G-Pose 服务（默认 `F2G_VISION_URL=http://127.0.0.1:7862`）。它只读取一
+张同步 RGB-D 图像，不发布 ROS、不移动底盘。响应包含 `objects[]` 的
+`id`、`position_m`、`quaternion_xyzw`、`rotation_matrix`、`size_m` 和
+`bbox_xyxy`，以及 `image.base64` 的 JPEG 标注图。ID 是当前图像内 SAM 3
+的从左到右序号，不是跨帧跟踪 ID。视觉请求超时可用
+`F2G_VISION_TIMEOUT_S` 配置。
+
+底盘视觉对齐接口同样通过 F2G 服务执行：
+
+```http
+GET /base_alignment/preview?instance_index=2&prompt=water%20bottle
+X-API-Key: <key>
+```
+
+该接口会重新获取当前图像，选择指定瓶子 index，转换到 `base_link`，并返回
+`relative_move`；不发送底盘动作。确认结果后再调用：
+
+```http
+POST /base_alignment/move
+X-API-Key: <key>
+Content-Type: application/json
+
+{"instance_index": 2, "prompt": "water bottle"}
+```
+
+成功响应中的 `executed=true` 才表示 MoveRelative goal 已发送并完成。该原型
+仍未加入额外的运动安全和新鲜度门控；运行前需由上层确认现场安全。
 
 ## 最小调用示例
 

@@ -1,4 +1,4 @@
-"""Bounded one-shot EEF translation for the robot task scheduler."""
+"""Bounded RPent-style EEF translation for the robot task scheduler."""
 
 import math
 
@@ -6,9 +6,8 @@ from tools.common import option_arguments, run_command, script_command
 
 
 EEF_DELTA_OPTIONS = {
-    'control-backend', 'vlahost-url', 'namespace', 'feedback-timeout',
-    'rate-hz', 'ik-source', 'joint-source', 'head-joint-count', 'model-xml',
-    'once-timeout-s', 'once-tolerance-mm', 'once-settle-s',
+    'vlahost-url', 'namespace', 'model-xml', 'tf-timeout-s',
+    'motion-timeout-s', 'tolerance-mm', 'settle-s', 'max-position-offset-mm',
 }
 
 
@@ -38,14 +37,13 @@ class EefDeltaTool:
             raise ValueError('eef_delta 位移向量范数不能超过 200 mm')
 
         options = dict(task.get('options', {}))
-        options.setdefault('control-backend', 'vlahost')
         options.setdefault('max-position-offset-mm', 200)
-        allowed = EEF_DELTA_OPTIONS | {'max-position-offset-mm'}
-        command = script_command('arm_teleop.py') + [
+        allowed = EEF_DELTA_OPTIONS
+        command = script_command('eef_delta.py') + [
             f'--side={side}', '--execute',
-            f'--move-x-mm={values[0]}',
-            f'--move-y-mm={values[1]}',
-            f'--move-z-mm={values[2]}',
+            f'--dx-mm={values[0]}',
+            f'--dy-mm={values[1]}',
+            f'--dz-mm={values[2]}',
         ] + option_arguments(options, allowed)
         return command
 

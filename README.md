@@ -8,6 +8,10 @@ Move Agent 使用大模型把用户自然语言路由到真实 Luna 机器人的
 - `grasp_object(tag_id?)`：执行 AprilTag 抓放；默认使用标签 5，也支持标签 3。
 - `move_eef_delta(side, dx_mm, dy_mm, dz_mm)`：沿 `base_link` 对选定 EEF 做一次不超过 200 mm 的短位移。
 
+`move_eef_delta` 使用 RPent 的 VLAHost EEF 逻辑：读取新鲜 `/hil/snapshot` 与本地
+TF，通过 `/action_chunk` 发送 10 帧绝对双臂目标，并检查发布序列、IK 路由和未选中
+手臂保持；它不复用 `arm_teleop.py`。
+
 底层速度、超时、标定文件和机器人地址不交给 LLM 决定。每个用户请求只调用一次 LLM；一次最多执行一个机器人动作，不自动重试。
 
 ## 工作方式

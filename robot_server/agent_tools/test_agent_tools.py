@@ -210,14 +210,30 @@ class AgentToolsTest(unittest.TestCase):
         command = EefDeltaTool().build_command({
             'side': 'left', 'dx_mm': 20, 'dy_mm': 0, 'dz_mm': 10,
         })
-        self.assertEqual(Path(command[2]).name, 'arm_teleop.py')
+        self.assertEqual(Path(command[2]).name, 'eef_delta.py')
         self.assertIn('--side=left', command)
         self.assertIn('--execute', command)
-        self.assertIn('--move-x-mm=20', command)
-        self.assertIn('--move-y-mm=0', command)
-        self.assertIn('--move-z-mm=10', command)
-        self.assertIn('--control-backend=vlahost', command)
+        self.assertIn('--dx-mm=20', command)
+        self.assertIn('--dy-mm=0', command)
+        self.assertIn('--dz-mm=10', command)
         self.assertIn('--max-position-offset-mm=200', command)
+        self.assertNotIn('arm_teleop.py', command)
+
+    def test_eef_delta_rejects_teleop_backend_options(self):
+        with self.assertRaises(ValueError):
+            EefDeltaTool().build_command({
+                'side': 'left', 'dx_mm': 20, 'dy_mm': 0, 'dz_mm': 10,
+                'options': {'control-backend': 'vlahost'},
+            })
+
+    def test_eef_delta_script_uses_rpent_action_chunk_contract(self):
+        source = (SCRIPTS_DIR / 'eef_delta.py').read_text(encoding='utf-8')
+        self.assertIn("'/action_chunk'", source)
+        self.assertIn("'need_new_chunk'", source)
+        self.assertIn("'publication'", source)
+        self.assertIn("'input_mode'", source)
+        self.assertIn("'eef_left'", source)
+        self.assertNotIn('arm_teleop.py', source)
 
     def test_eef_delta_rejects_invalid_vectors(self):
         for task in (

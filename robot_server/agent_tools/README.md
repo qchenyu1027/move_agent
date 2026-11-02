@@ -2,19 +2,25 @@
 
 调度器位于 `agent_tools/scheduler.py`；工具位于 `tools/move_tool.py`、
 `tools/move_xy_tool.py`、`tools/grasp_tool.py`、`tools/torso_tool.py` 和
-`tools/go_home_tool.py`、`tools/arm_teleop_tool.py` 和 `tools/gripper_tool.py`。工具调用的控制脚本及其数据统一放在 `tools/scripts/`，
+`tools/go_home_tool.py`、`tools/arm_teleop_tool.py`、`tools/eef_delta_tool.py` 和
+`tools/gripper_tool.py`。工具调用的控制脚本及其数据统一放在 `tools/scripts/`，
 `arm_teleop.py` 使用同目录的 `right_arm_teleop.py`，不依赖 robot_server 目录外的 Python 文件；全身 IK 使用 NumPy，依赖列在 `requirements-api.txt`。
 
 | 目录 | 内容 |
 | --- | --- |
 | `agent_tools/` | 调度器、HTTP 服务、启动脚本、任务示例，以及全部离线测试 |
 | `tools/` | 导航、抓取、躯干、手臂和夹爪工具封装、参数校验与控制进程管理 |
-| `tools/scripts/` | VLAHost 世界位姿闭环 + Apex MoveRelative `native_nav_test.py`、站点数据 `pos.yaml`；AprilTag 抓取脚本、ROS `go_home.py`、`arm_teleop.py`、`gripper_control.py` 及动作数据文件 |
+| `tools/scripts/` | VLAHost 世界位姿闭环 + Apex MoveRelative `native_nav_test.py`、站点数据 `pos.yaml`；AprilTag 抓取脚本、ROS `go_home.py`、`arm_teleop.py`、独立 RPent 风格 `eef_delta.py`、`gripper_control.py` 及动作数据文件 |
 
-`tools/scripts/` 中是从原目录复制、并把路径改为相对自身目录的独立副本；`arm_teleop.py` 是同目录遥操实现的启动入口。原文件保持不变，
+`tools/scripts/` 中是从原目录复制、并把路径改为相对自身目录的独立副本；`arm_teleop.py` 是同目录遥操实现的启动入口，`eef_delta.py` 是独立的 RPent 风格 VLAHost `action_chunk` 执行器。原文件保持不变，
 其他工具不再调用它们。两边之后各自修改不会自动同步：用根目录的 `measure_tag_to_left_tool_offset.py`
 重新标定后，需要把新的 yaml 复制到 `tools/scripts/`，或在项目根目录标定时加
 `--output tools/scripts/tag5_left_tool_offset.yaml` 直接写入。
+
+只读视觉接口 `GET /vision/bottles?prompt=water%20bottle` 通过
+`F2G_VISION_URL` 代理到 F2G-Pose，返回当前帧所有瓶子的结构化 6D 位姿和
+带 instance ID/坐标轴的 JPEG base64。它需要 `X-API-Key`，但不执行机器人动作；
+部署 F2G 服务和代理的配置见 `README_LLM_API.md`。
 
 ## 运行
 
@@ -51,7 +57,7 @@ python3 -B -m agent_tools.scheduler agent_tools/tasks.example.json --execute
 | `torso_home_down` | `offset_mm`（非零有限值，负数下降、正数上升） | 先到独立保存的原始双手水平 home，再只用躯干 IK 调整躯干高度；双臂关节保持 home |
 | `go_home` | 无 | 通过 ROS `Trigger` 服务调用 `<namespace>/control/go_home`，并等待服务返回的计划运动时长后继续下一任务；默认命名空间为 `APEX_ROS_NAMESPACE` 或 `tj` |
 | `arm_teleop` | `side: left` 或 `right` | `control-backend=auto` 时检测 `control/replay/ik_request` 是否有订阅者；有则走 ROS replay，没有则通过 VLAHost HTTP `/action` 控制末端位姿；默认启动键盘遥操，指定 `move-x-mm`、`move-y-mm` 或 `move-z-mm` 时执行一次性位移并自动退出 |
-| `eef_delta` | `side`、`dx_mm`、`dy_mm`、`dz_mm` | 沿 `base_link` 对选定 EEF 做一次不超过 200 mm 的短位移；默认使用 VLAHost EEF 链路，不启动交互键盘 |
+| `eef_delta` | `side`、`dx_mm`、`dy_mm`、`dz_mm` | 按 RPent EEF 链路读取并校验双侧 `/hil/snapshot`，通过 VLAHost `/action_chunk` 对选定 EEF 做一次不超过 200 mm 的短位移；不调用 `arm_teleop.py`、不发布直接 IK |
 | `gripper` | `side`、`action` | 默认通过 ROS `std_msgs/Float32` 控制；`options.control-backend=vlahost` 时通过 VLAHost HTTP `/action` 的 `gripper_left/right` 控制；`action` 为 `open`、`close` 或 `set`，`position` 为目标开合度 0..1，`options.speed` 为开合速度（开合度/秒） |
 
 完整搬运示例见 `agent_tools/bottle_transport_2_to_3.json`。该任务依次到站点 2、下蹲、沿世界 Y 轴移动 -0.2 m、切换 IK 源 2 和关节命令源 0、到达水瓶抓取点、单独设置左夹爪 0.4、回 home、左手上移 50 mm、到站点 3、左手下移 50 mm、设置夹爪 0.0。`head_object_grasp` 的 `reach-only` 选项在到达抓取点后结束，不执行脚本内的自动夹紧和抬升；`position-only` 只表示保持当前工具姿态。
