@@ -89,6 +89,27 @@ class AgentToolsApiTest(unittest.IsolatedAsyncioTestCase):
             'offset_mm': -10, 'tool': 'torso_home_down',
         }], execute=True)
 
+    async def test_eef_delta_executes_bounded_translation(self):
+        with patch('agent_tools.api.TaskScheduler.run', return_value=0) as run:
+            response = await self.client.post(
+                '/eef_delta', headers=self.headers,
+                json={'side': 'left', 'dx_mm': 20, 'dy_mm': 0, 'dz_mm': 10})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            'ok': True, 'message': 'EEF 位移已完成'})
+        run.assert_called_once_with([{
+            'side': 'left', 'dx_mm': 20, 'dy_mm': 0, 'dz_mm': 10,
+            'tool': 'eef_delta',
+        }], execute=True)
+
+    async def test_eef_delta_rejects_over_limit(self):
+        with patch('agent_tools.api.TaskScheduler.run') as run:
+            response = await self.client.post(
+                '/eef_delta', headers=self.headers,
+                json={'side': 'left', 'dx_mm': 201, 'dy_mm': 0, 'dz_mm': 0})
+        self.assertEqual(response.status_code, 422)
+        run.assert_not_called()
+
     async def test_move_cannot_override_tool(self):
         with patch('agent_tools.api.TaskScheduler.run', return_value=0) as run:
             response = await self.client.post(

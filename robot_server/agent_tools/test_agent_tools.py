@@ -15,6 +15,7 @@ from agent_tools.scheduler import TaskScheduler
 from tools.common import SCRIPTS_DIR, run_command
 from tools.arm_teleop_tool import ArmTeleopTool
 from tools.control_sources_tool import ControlSourcesTool
+from tools.eef_delta_tool import EefDeltaTool
 from tools.go_home_tool import GoHomeTool
 from tools.scripts.go_home import started_duration
 from tools.scripts import select_control_sources
@@ -204,6 +205,29 @@ class AgentToolsTest(unittest.TestCase):
                 {'side': 'right', 'pose': [0, 0, 0]}):
             with self.subTest(task=task), self.assertRaises(ValueError):
                 ArmTeleopTool().build_command(task)
+
+    def test_eef_delta_builds_bounded_vlahost_command(self):
+        command = EefDeltaTool().build_command({
+            'side': 'left', 'dx_mm': 20, 'dy_mm': 0, 'dz_mm': 10,
+        })
+        self.assertEqual(Path(command[2]).name, 'arm_teleop.py')
+        self.assertIn('--side=left', command)
+        self.assertIn('--execute', command)
+        self.assertIn('--move-x-mm=20', command)
+        self.assertIn('--move-y-mm=0', command)
+        self.assertIn('--move-z-mm=10', command)
+        self.assertIn('--control-backend=vlahost', command)
+        self.assertIn('--max-position-offset-mm=200', command)
+
+    def test_eef_delta_rejects_invalid_vectors(self):
+        for task in (
+                {'side': 'left', 'dx_mm': 0, 'dy_mm': 0, 'dz_mm': 0},
+                {'side': 'left', 'dx_mm': 201, 'dy_mm': 0, 'dz_mm': 0},
+                {'side': 'middle', 'dx_mm': 1, 'dy_mm': 0, 'dz_mm': 0},
+                {'side': 'left', 'dx_mm': 1, 'dy_mm': 0, 'dz_mm': 0,
+                 'options': 'invalid'}):
+            with self.subTest(task=task), self.assertRaises(ValueError):
+                EefDeltaTool().build_command(task)
 
     def test_gripper_builds_open_close_and_position_commands(self):
         command = GripperTool().build_command({

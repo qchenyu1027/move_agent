@@ -1,4 +1,6 @@
-"""提供给 LLM 的两个机器人动作。底层运动参数不暴露给模型。"""
+"""提供给 LLM 的机器人原子动作。底层运动参数不暴露给模型。"""
+
+import math
 
 DEFAULT_GRASP_TAG_ID = 5
 GRASP_OFFSET_CONFIGS = {
@@ -38,6 +40,30 @@ def grasp(robot, arguments):
     return robot.grasp_apriltag(tag_id, GRASP_OFFSET_CONFIGS[tag_id])
 
 
+def move_eef_delta(robot, arguments):
+    """将选定 EEF 沿 base_link 坐标系移动一个不超过 200 mm 的短位移。"""
+    if not isinstance(arguments, dict) or set(arguments) != {
+        "side", "dx_mm", "dy_mm", "dz_mm",
+    }:
+        raise ValueError("move_eef_delta 需要 side、dx_mm、dy_mm、dz_mm")
+    side = arguments["side"]
+    if side not in {"left", "right"}:
+        raise ValueError("side 只能是 left 或 right")
+    values = tuple(arguments[name] for name in ("dx_mm", "dy_mm", "dz_mm"))
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        for value in values
+    ):
+        raise ValueError("EEF 位移必须是有限数值")
+    if not any(values):
+        raise ValueError("EEF 位移不能全为 0")
+    if math.dist(values, (0.0, 0.0, 0.0)) > 200.0:
+        raise ValueError("EEF 单次位移不能超过 200 mm")
+    return robot.move_eef_delta(side, *values)
+
+
 MOVE_TOOL = {
     "type": "function",
     "function": {
@@ -71,5 +97,28 @@ GRASP_TOOL = {
     },
 }
 
-ROBOT_TOOL_SCHEMAS = [MOVE_TOOL, GRASP_TOOL]
-ROBOT_TOOL_HANDLERS = {"move_robot": move, "grasp_object": grasp}
+EEF_DELTA_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "move_eef_delta",
+        "description": move_eef_delta.__doc__,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "side": {"type": "string", "enum": ["left", "right"]},
+                "dx_mm": {"type": "number"},
+                "dy_mm": {"type": "number"},
+                "dz_mm": {"type": "number"},
+            },
+            "required": ["side", "dx_mm", "dy_mm", "dz_mm"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+ROBOT_TOOL_SCHEMAS = [MOVE_TOOL, GRASP_TOOL, EEF_DELTA_TOOL]
+ROBOT_TOOL_HANDLERS = {
+    "move_robot": move,
+    "grasp_object": grasp,
+    "move_eef_delta": move_eef_delta,
+}

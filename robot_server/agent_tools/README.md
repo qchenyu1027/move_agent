@@ -51,6 +51,7 @@ python3 -B -m agent_tools.scheduler agent_tools/tasks.example.json --execute
 | `torso_home_down` | `offset_mm`（非零有限值，负数下降、正数上升） | 先到独立保存的原始双手水平 home，再只用躯干 IK 调整躯干高度；双臂关节保持 home |
 | `go_home` | 无 | 通过 ROS `Trigger` 服务调用 `<namespace>/control/go_home`，并等待服务返回的计划运动时长后继续下一任务；默认命名空间为 `APEX_ROS_NAMESPACE` 或 `tj` |
 | `arm_teleop` | `side: left` 或 `right` | `control-backend=auto` 时检测 `control/replay/ik_request` 是否有订阅者；有则走 ROS replay，没有则通过 VLAHost HTTP `/action` 控制末端位姿；默认启动键盘遥操，指定 `move-x-mm`、`move-y-mm` 或 `move-z-mm` 时执行一次性位移并自动退出 |
+| `eef_delta` | `side`、`dx_mm`、`dy_mm`、`dz_mm` | 沿 `base_link` 对选定 EEF 做一次不超过 200 mm 的短位移；默认使用 VLAHost EEF 链路，不启动交互键盘 |
 | `gripper` | `side`、`action` | 默认通过 ROS `std_msgs/Float32` 控制；`options.control-backend=vlahost` 时通过 VLAHost HTTP `/action` 的 `gripper_left/right` 控制；`action` 为 `open`、`close` 或 `set`，`position` 为目标开合度 0..1，`options.speed` 为开合速度（开合度/秒） |
 
 完整搬运示例见 `agent_tools/bottle_transport_2_to_3.json`。该任务依次到站点 2、下蹲、沿世界 Y 轴移动 -0.2 m、切换 IK 源 2 和关节命令源 0、到达水瓶抓取点、单独设置左夹爪 0.4、回 home、左手上移 50 mm、到站点 3、左手下移 50 mm、设置夹爪 0.0。`head_object_grasp` 的 `reach-only` 选项在到达抓取点后结束，不执行脚本内的自动夹紧和抬升；`position-only` 只表示保持当前工具姿态。
@@ -206,7 +207,7 @@ python3 -B -m unittest -v agent_tools.test_agent_tools agent_tools.test_agent_to
 ## 局域网 HTTP 服务
 
 服务位于 `agent_tools/api.py`，提供 `GET /health`、`POST /move`、`POST /move_xy`、
-`POST /grasp`、`POST /head_object_grasp`、`POST /torso_home_down`、`POST /tasks` 和 `POST /cancel`。接口直接执行现有调度器，
+`POST /grasp`、`POST /head_object_grasp`、`POST /torso_home_down`、`POST /eef_delta`、`POST /tasks` 和 `POST /cancel`。接口直接执行现有调度器，
 HTTP 响应要等机器人动作完成。
 同一服务进程一次只执行一个动作；忙碌时返回 HTTP 409。不要启动多个服务进程或
 Uvicorn worker，否则进程之间不能共用动作锁。
@@ -263,6 +264,8 @@ curl -X POST -H "X-API-Key: $ROBOT_API_KEY" http://ROBOT_IP:8000/cancel
 `{"grasp_and_lift":false}`。两者均可传 `options`，字段与上文任务格式相同。
 `POST /move_xy` 需要 `{"x_m":...,"y_m":...}`，表示相对当前世界坐标的 x/y 米数；
 它保持当前 yaw 和 z，只执行平移。
+`POST /eef_delta` 需要 `{"side":"left|right","dx_mm":...,"dy_mm":...,"dz_mm":...}`，
+表示沿当前 `base_link` 轴对选定 EEF 做一次短位移；位移向量范数必须不超过 200 mm。
 `POST /tasks` 接收完整的非空任务数组，执行前校验整个计划。
 
 `GET /health` 汇总 VLAHost HTTP/ROS 反馈、世界位姿新鲜度、关键 ROS

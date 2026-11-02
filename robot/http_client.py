@@ -86,6 +86,17 @@ class RealRobotClient:
         merged["offset-config"] = offset_config
         return self._action("/grasp", {"tag_id": tag_id, "options": merged}, f"AprilTag {tag_id} 抓放")
 
+    def move_eef_delta(self, side, dx_mm, dy_mm, dz_mm, options=None):
+        payload = {
+            "side": side,
+            "dx_mm": dx_mm,
+            "dy_mm": dy_mm,
+            "dz_mm": dz_mm,
+        }
+        if options:
+            payload["options"] = options
+        return self._action("/eef_delta", payload, f"{side} EEF 位移")
+
     def cancel(self):
         result = self._request("POST", "/cancel", timeout=self.health_timeout, auth=True)
         accepted = result.get("http_status") == 202

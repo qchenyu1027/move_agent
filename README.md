@@ -2,10 +2,11 @@
 
 Move Agent 使用大模型把用户自然语言路由到真实 Luna 机器人的移动或抓取函数。如果没有匹配动作时，大模型直接进行简短问答。
 
-当前只向 LLM 提供两个动作：
+当前向 LLM 提供以下原子动作：
 
 - `move_robot(pose_id)`：移动到预设位置 1、2、3。
 - `grasp_object(tag_id?)`：执行 AprilTag 抓放；默认使用标签 5，也支持标签 3。
+- `move_eef_delta(side, dx_mm, dy_mm, dz_mm)`：沿 `base_link` 对选定 EEF 做一次不超过 200 mm 的短位移。
 
 底层速度、超时、标定文件和机器人地址不交给 LLM 决定。每个用户请求只调用一次 LLM；一次最多执行一个机器人动作，不自动重试。
 
@@ -288,7 +289,7 @@ move_agent/
 ├── harness/model.py               LLM HTTP Client
 ├── harness/runtime.py             单次意图路由和工具执行
 ├── prompt_robot.md                LLM 行为规则
-├── tools/robot_tools.py           提供给 LLM 的两个工具
+├── tools/robot_tools.py           提供给 LLM 的机器人原子工具
 ├── robot/http_client.py           机器人 FastAPI Client
 ├── robot_server/agent_tools/api.py 机器人 FastAPI Server
 ├── robot_server/tools/            移动和抓取程序

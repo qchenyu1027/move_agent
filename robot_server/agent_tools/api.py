@@ -285,6 +285,12 @@ def create_app(api_key=None):
         task = {**payload, 'tool': 'torso_home_down'}
         return await execute([task], '已回 home 并完成躯干下降', request)
 
+    @app.post('/eef_delta', dependencies=[Depends(authorize)])
+    async def eef_delta(request: FastAPIRequest, body: dict | None = None):
+        payload = body or {}
+        task = {**payload, 'tool': 'eef_delta'}
+        return await execute([task], 'EEF 位移已完成', request)
+
     @app.post('/grasp', dependencies=[Depends(authorize)])
     async def grasp(request: FastAPIRequest, body: dict | None = None):
         # 远程单次抓取默认只抓住并抬起，避免意外进入完整抓放流程。

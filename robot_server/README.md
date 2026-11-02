@@ -1,6 +1,6 @@
 # robot_server
 
-机器人端服务。`agent_tools/` 提供 FastAPI（`/health`、`/move`、`/move_xy`、`/grasp`、`/head_object_grasp`、`/tasks`、`/cancel`）与任务调度，
+机器人端服务。`agent_tools/` 提供 FastAPI（`/health`、`/move`、`/move_xy`、`/grasp`、`/head_object_grasp`、`/eef_delta`、`/tasks`、`/cancel`）与任务调度，
 `tools/` 提供导航、抓取、躯干、手臂、夹爪等工具封装和控制脚本（`tools/scripts/`）。上层 move_agent 通过 HTTP 调用它，
 详见 [`agent_tools/README.md`](agent_tools/README.md) 和 [`agent_tools/README_LLM_API.md`](agent_tools/README_LLM_API.md)。
 

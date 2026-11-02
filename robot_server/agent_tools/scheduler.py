@@ -15,6 +15,7 @@ if __package__ in (None, ''):
 from tools.common import run_command
 from tools.arm_teleop_tool import ArmTeleopTool
 from tools.control_sources_tool import ControlSourcesTool
+from tools.eef_delta_tool import EefDeltaTool
 from tools.go_home_tool import GoHomeTool
 from tools.gripper_tool import GripperTool
 from tools.grasp_tool import GraspTool
@@ -37,6 +38,7 @@ class TaskScheduler:
             'torso_home_down': TorsoTool(),
             'go_home': GoHomeTool(),
             'arm_teleop': ArmTeleopTool(),
+            'eef_delta': EefDeltaTool(),
             'gripper': GripperTool(),
         }
         self.cancel_event = threading.Event()
@@ -59,7 +61,7 @@ class TaskScheduler:
                 raise ValueError(
                     f'任务 {index} 的 tool 只能是 move、move_xy、control_sources、grasp、'
                     'head_object_grasp、torso_home_down、go_home、'
-                    'arm_teleop 或 gripper')
+                    'arm_teleop、eef_delta 或 gripper')
             try:
                 commands.append(tool.build_command(task))
             except ValueError as error:

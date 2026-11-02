@@ -3,7 +3,7 @@ import json
 import pytest
 
 from harness.runtime import Harness
-from tools.robot_tools import grasp, move
+from tools.robot_tools import grasp, move, move_eef_delta
 
 
 class FakeRobot:
@@ -19,6 +19,10 @@ class FakeRobot:
         assert type(tag_id) is int
         self.actions.append(("grasp", tag_id, offset_config))
         return {"ok": True, "message": "抓取完成"}
+
+    def move_eef_delta(self, side, dx_mm, dy_mm, dz_mm):
+        self.actions.append(("eef", side, dx_mm, dy_mm, dz_mm))
+        return {"ok": True, "message": "EEF 位移完成"}
 
 
 @pytest.mark.parametrize("value", [1, 2, 3, "1", "2", "3", " 2\n"])
@@ -59,6 +63,25 @@ def test_argument_structure_remains_restricted(action, arguments):
     with pytest.raises(ValueError):
         action(robot, arguments)
     assert robot.actions == []
+
+
+@pytest.mark.parametrize("value", [201, -201, float("inf"), float("nan")])
+def test_eef_delta_rejects_unsafe_values(value):
+    robot = FakeRobot()
+    with pytest.raises(ValueError):
+        move_eef_delta(robot, {
+            "side": "left", "dx_mm": value, "dy_mm": 0, "dz_mm": 0,
+        })
+    assert robot.actions == []
+
+
+def test_eef_delta_executes_bounded_translation():
+    robot = FakeRobot()
+    result = move_eef_delta(robot, {
+        "side": "right", "dx_mm": 20, "dy_mm": 0, "dz_mm": -10,
+    })
+    assert result["ok"] is True
+    assert robot.actions == [("eef", "right", 20, 0, -10)]
 
 
 @pytest.mark.parametrize("name, arguments, expected", [

@@ -7,7 +7,7 @@
 ```text
 Base URL: http://6.6.7.101:8000
 健康检查: GET /health（无需鉴权）
-动作接口: POST /move、/move_xy、/grasp、/tasks、/cancel
+动作接口: POST /move、/move_xy、/grasp、/eef_delta、/tasks、/cancel
 鉴权请求头: X-API-Key: <ROBOT_API_KEY>
 Content-Type: application/json
 ```
@@ -146,6 +146,22 @@ Content-Type: application/json
 ```json
 {"tag_id":5,"grasp_and_lift":false,"options":{"offset-config":"tag5_left_tool_offset.yaml"}}
 ```
+
+### EEF 短位移
+
+`POST /eef_delta` 沿当前 `base_link` 坐标系对指定 EEF 做一次原子平移，单次位移
+向量范数不超过 200 mm：
+
+```http
+POST /eef_delta
+X-API-Key: <key>
+Content-Type: application/json
+
+{"side":"left","dx_mm":20,"dy_mm":0,"dz_mm":10}
+```
+
+`side` 必须是 `left` 或 `right`；三个位移字段都必须提供，且不能全部为零。
+它不是键盘遥操，也不接受连续轨迹；调用前仍必须通过 `/health` 的运动准入检查。
 
 ### 串行任务计划
 

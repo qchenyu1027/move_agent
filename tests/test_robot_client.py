@@ -70,6 +70,23 @@ def test_timeout_is_unknown_and_not_retryable():
     assert len(robot.opener.requests) == 2
 
 
+def test_eef_delta_checks_health_then_sends_authenticated_action():
+    robot = client([
+        Response({"ok": True, "ready_for_motion": True, "api": {"busy": False}}),
+        Response({"ok": True}),
+    ])
+    result = robot.move_eef_delta("left", 20, 0, 10)
+    assert result["ok"] is True
+    assert [r.full_url for r, _ in robot.opener.requests] == [
+        "http://robot:8000/health", "http://robot:8000/eef_delta",
+    ]
+    action = robot.opener.requests[1][0]
+    assert action.headers["X-api-key"] == "secret"
+    assert json.loads(action.data) == {
+        "side": "left", "dx_mm": 20, "dy_mm": 0, "dz_mm": 10,
+    }
+
+
 def test_llm_tools_use_simple_arguments():
     class FakeRobot:
         def move_pose_ids(self, pose_ids, options=None):
@@ -77,6 +94,9 @@ def test_llm_tools_use_simple_arguments():
 
         def grasp_apriltag(self, tag_id, offset_config, options=None):
             return {"tag_id": tag_id, "offset_config": offset_config}
+
+        def move_eef_delta(self, side, dx_mm, dy_mm, dz_mm, options=None):
+            return {"side": side, "dx_mm": dx_mm, "dy_mm": dy_mm, "dz_mm": dz_mm}
 
     robot = FakeRobot()
     assert move(robot, {"pose_id": 2}) == {"pose_ids": [2]}
