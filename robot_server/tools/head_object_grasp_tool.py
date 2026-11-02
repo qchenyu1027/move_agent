@@ -9,7 +9,7 @@ from tools.common import option_arguments, run_command, script_command
 HEAD_OBJECT_GRASP_OPTIONS = {
     'position-only', 'reach-only', 'control-backend', 'vlahost-url', 'http-timeout-s', 'http-action-hz',
     'http-log-hz', 'namespace', 'model-xml', 'ik-topic', 'ik-source',
-    'joint-source', 'capture-timeout', 'preflight-timeout', 'motion-timeout',
+    'joint-source', 'capture-timeout', 'pose-request-interval', 'preflight-timeout', 'motion-timeout',
     'feedback-timeout', 'max-pose-age', 'stable-samples',
     'stable-position-mm', 'stable-angle-deg', 'approach-height-mm',
     'lift-height-mm', 'max-displacement-mm', 'max-target-angle-deg',

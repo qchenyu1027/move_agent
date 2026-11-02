@@ -28,6 +28,8 @@
     "grasp_offset_mm": [0, 0, -40],
     "options": {
       "capture-timeout": 45,
+      "pose-request-interval": 1,
+      "motion-timeout": 15,
       "model-xml": "/home/liuqian/copy/Apex_Deploy/robot_node/marvin_description/mjcf/Gento_Luna/Gento_Luna.xml",
       "position-only": true,
       "reach-only": true,

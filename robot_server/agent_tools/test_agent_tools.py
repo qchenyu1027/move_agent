@@ -73,7 +73,7 @@ class AgentToolsTest(unittest.TestCase):
             'side': 'left',
             'grasp_offset_mm': [0, 0, -40],
             'options': {'position-only': True, 'reach-only': True, 'ik-source': 2,
-                        'joint-source': 0},
+                        'joint-source': 0, 'pose-request-interval': 2},
         })
         self.assertEqual(Path(command[2]).name, 'head_object_grasp.py')
         self.assertIn('--object-pose-topic=/object_pose', command)
@@ -84,6 +84,7 @@ class AgentToolsTest(unittest.TestCase):
         self.assertEqual(command[start + 1:start + 4], ['0', '0', '-40'])
         self.assertIn('--position-only', command)
         self.assertIn('--ik-source=2', command)
+        self.assertIn('--pose-request-interval=2', command)
 
     def test_head_object_grasp_validates_offset(self):
         with self.assertRaises(ValueError):

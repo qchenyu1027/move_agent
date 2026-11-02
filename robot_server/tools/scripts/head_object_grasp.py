@@ -135,6 +135,8 @@ def parse_args(argv=None):
     parser.add_argument('--ik-source', type=int, default=0)
     parser.add_argument('--joint-source', type=int, default=0)
     parser.add_argument('--capture-timeout', type=float, default=30.0)
+    parser.add_argument('--pose-request-interval', type=float, default=1.0,
+                        help='未获得稳定物体位姿时的视觉请求重发间隔，单位 s')
     # robot_state_publisher 的动态 TF 缓存启动后通常需要几秒，预留时间避免
     # 物体位姿已经收到但末端 Arm_L7_Link 尚未进入 TF 缓存时误报失败。
     parser.add_argument('--preflight-timeout', type=float, default=15.0)
@@ -170,7 +172,7 @@ def parse_args(argv=None):
     parser.add_argument('--gripper-rate-hz', type=float, default=10.0,
                         help='夹爪命令发布频率，默认 10 Hz，范围 1..20 Hz')
     args = parser.parse_args(argv)
-    positive = ('capture_timeout', 'preflight_timeout', 'motion_timeout',
+    positive = ('capture_timeout', 'pose_request_interval', 'preflight_timeout', 'motion_timeout',
                 'feedback_timeout', 'max_pose_age', 'stable_position_mm',
                 'stable_angle_deg', 'max_displacement_mm', 'max_target_angle_deg',
                 'position_tolerance_mm', 'angle_tolerance_deg', 'settle_time',
@@ -261,7 +263,7 @@ class HeadObjectGrasp(Node):
         self.pose_request = (self.create_publisher(Empty, args.pose_request_topic,
                                                    qos_profile_sensor_data)
                              if args.pose_request_topic else None)
-        self.pose_request_sent = False
+        self.last_pose_request_at = None
         state_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Int32, topic_name(args.namespace, 'info/ik_request_mux/active_source'),
@@ -560,10 +562,16 @@ class HeadObjectGrasp(Node):
             self.target = target
         self.get_logger().info(f'进入 {phase} 阶段，目标={self.target}')
 
-    def finish(self, code, reason):
-        self.exit_code = code
+    def stop_control(self):
+        """停止本脚本的控制输出，避免退出后 IK 继续使用最后一个目标。"""
         if getattr(self, 'http_mode', False):
             self.release_http()
+        elif getattr(self, 'publisher', None) is not None:
+            self.publish_request(False)
+
+    def finish(self, code, reason):
+        self.exit_code = code
+        self.stop_control()
         if code:
             self.get_logger().error(reason)
         else:
@@ -574,11 +582,15 @@ class HeadObjectGrasp(Node):
             return
         now = time.monotonic()
         if self.phase == 'capture':
-            if (self.pose_request is not None and not self.pose_request_sent and
+            request_due = (self.last_pose_request_at is None or
+                           now - self.last_pose_request_at >= self.args.pose_request_interval)
+            if (self.pose_request is not None and request_due and
                     self.pose_request.get_subscription_count() > 0):
                 self.pose_request.publish(Empty())
-                self.pose_request_sent = True
-                self.get_logger().info(f'已向 {self.args.pose_request_topic} 请求 F2G-Pose 位姿')
+                self.last_pose_request_at = now
+                self.get_logger().info(
+                    f'已向 {self.args.pose_request_topic} 请求 F2G-Pose 位姿；'
+                    f'未收到稳定位姿前每 {self.args.pose_request_interval:g} s 重发')
             self.capture()
             if self.phase == 'capture' and now - self.started > self.args.capture_timeout:
                 self.finish(1, '物体稳定姿态采集超时；检查 PoseStamped 话题、时间戳及相机到 base_link 的 TF')
@@ -690,7 +702,7 @@ def main():
         return 1
     finally:
         if node is not None:
-            node.release_http()
+            node.stop_control()
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
