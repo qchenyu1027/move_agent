@@ -12,7 +12,7 @@ import sys
 SCRIPTS_DIR = Path(__file__).resolve().parent / 'scripts'
 
 
-def option_arguments(options, allowed):
+def option_arguments(options, allowed, flags=()):
     """只接受完整选项名，避免 argparse 缩写或控制开关改变任务语义。"""
     if not isinstance(options, dict):
         raise ValueError('options 必须是对象')
@@ -20,6 +20,13 @@ def option_arguments(options, allowed):
     for name, value in options.items():
         if name not in allowed:
             raise ValueError(f'不支持的选项 {name!r}；允许：{", ".join(sorted(allowed))}')
+        if name in flags:
+            if value is True or (isinstance(value, str) and value.lower() == 'true'):
+                arguments.append(f'--{name}')
+                continue
+            if value is False or (isinstance(value, str) and value.lower() == 'false'):
+                continue
+            raise ValueError(f'开关选项 {name} 必须为 true 或 false')
         if (isinstance(value, bool) or not isinstance(value, (str, int, float))
                 or isinstance(value, float) and not math.isfinite(value)
                 or isinstance(value, str) and (not value or '\x00' in value)):

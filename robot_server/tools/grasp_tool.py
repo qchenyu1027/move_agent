@@ -16,8 +16,8 @@ GRASP_OPTIONS = {
     'approach-height-mm', 'approach-step-mm', 'base-right-distance-mm',
     'base-lateral-speed-m-s', 'base-return-world-x-m', 'base-return-world-y-m',
     'base-return-world-z-m', 'base-return-world-yaw-rad',
-    'base-return-yaw-speed-rad-s', 'base-return-pose-tolerance-m',
-    'base-return-yaw-tolerance-rad', 'vlahost-url',
+    'base-return-pose-tolerance-m', 'base-return-yaw-tolerance-rad',
+    'base-action-name', 'base-location-topic', 'base-move-timeout-s',
 }
 
 

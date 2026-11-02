@@ -1,0 +1,3 @@
+[
+  {"tool": "torso_home_down", "offset_mm": -160, "options": {"ramp-speed-rad-s": 0.15}}
+]

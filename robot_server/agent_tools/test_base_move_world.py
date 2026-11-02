@@ -10,11 +10,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-# 经 tools.move_tool 加载 tools/scripts 下的副本，避免误测根目录同名原件。
-from tools.move_tool import base_move_world
+# 直接测试保留的旧底盘脚本；默认 move 工具已改用 native_nav_test.py。
+from tools.scripts import base_move_world
 
 
-def make_pose(yaw=0.0, stamp=1.0, age=0.01):
+def make_pose(yaw=0.0, stamp=1.0, age=0.01, x=0.0, y=0.0, z=0.0):
     """构造符合 VLAHost 返回格式的世界底盘位姿。"""
     return {
         'valid': True,
@@ -22,7 +22,7 @@ def make_pose(yaw=0.0, stamp=1.0, age=0.01):
         'child_frame_id': 'body',
         'received_age_s': age,
         'stamp_s': stamp,
-        'position': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+        'position': {'x': x, 'y': y, 'z': z},
         'yaw_rad': yaw,
     }
 
@@ -41,6 +41,28 @@ class FakeClock:
 
 
 class BaseMoveWorldTest(unittest.TestCase):
+    def test_relative_xy_sets_absolute_target_and_preserves_heading(self):
+        args = SimpleNamespace(
+            offset_x_m=0.2, offset_y_m=-0.1,
+            target_x_m=0.0, target_y_m=0.0, target_z_m=0.00603,
+            target_yaw_rad=0.05024, position_tolerance_m=0.05,
+            yaw_tolerance_rad=0.1)
+        mover = base_move_world.BaseWorldMover(args)
+        poses = iter([
+            make_pose(x=1.0, y=2.0, z=0.03, yaw=0.4),
+            make_pose(x=1.2, y=1.9, z=0.03, yaw=0.4),
+        ])
+        mover.wait_for_fresh_pose = lambda: next(poses)
+        calls = []
+        mover.move_xy = lambda: calls.append('xy')
+        mover.move_yaw = lambda: calls.append('yaw')
+        mover.run()
+        self.assertEqual(calls, ['xy', 'yaw'])
+        self.assertAlmostEqual(args.target_x_m, 1.2)
+        self.assertAlmostEqual(args.target_y_m, 1.9)
+        self.assertAlmostEqual(args.target_z_m, 0.03)
+        self.assertAlmostEqual(args.target_yaw_rad, 0.4)
+
     def test_seven_pose_values_convert_quaternion_to_yaw(self):
         values = [
             1.1593247946463563, -0.0606813495159879,

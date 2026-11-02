@@ -7,7 +7,7 @@
 ```text
 Base URL: http://6.6.7.101:8000
 健康检查: GET /health（无需鉴权）
-动作接口: POST /move、/grasp、/tasks、/cancel
+动作接口: POST /move、/move_xy、/grasp、/tasks、/cancel
 鉴权请求头: X-API-Key: <ROBOT_API_KEY>
 Content-Type: application/json
 ```
@@ -36,7 +36,10 @@ export NO_PROXY="${NO_PROXY:+$NO_PROXY,}6.6.7.101"
   "ok": true,
   "ready_for_motion": true,
   "api": {"busy": false},
-  "vlahost": {"ok": true, "ros_feedback": true, "connected": true},
+  "ros": {
+    "services": {"ok": true, "missing": []},
+    "topics": {"ok": true, "missing": []}
+  },
   "errors": [],
   "warnings": []
 }
@@ -48,7 +51,9 @@ export NO_PROXY="${NO_PROXY:+$NO_PROXY,}6.6.7.101"
 
 ### 移动到预设位姿
 
-预设编号目前只有 `1`、`2`、`3`。列表按顺序串行执行：
+预设编号为 `1`、`2`、`3`、`4`。`4` 对应世界位置
+`(-0.4597338939, -0.0571276842, 0.0162584066)` m、yaw 约 `-3.074537` rad。
+列表按顺序串行执行：
 
 ```http
 POST /move
@@ -64,7 +69,6 @@ Content-Type: application/json
 {
   "pose_ids": [3],
   "options": {
-    "speed-m-s": 0.06,
     "position-tolerance-m": 0.07
   }
 }
@@ -80,18 +84,48 @@ Content-Type: application/json
 }
 ```
 
+输入四元数转换为目标 yaw。执行脚本从 VLAHost `/base_world_pose` 读取 `camera_init -> body` 当前世界位姿，
+将目标的世界坐标差转换为 body-frame，并通过 `/move/MoveRelativeCmd` 只发送一个相对移动 goal，随后复查世界定位。
+它不调用 `/server/CreateTaskByPose`，也不使用 ROS 全局路径规划。此接口不提供地图绕障。
+
 `move` 必须且只能包含 `pose_ids`、`pose` 或 `fixed:true` 中的一种。LLM 不应使用无请求体的 `/move`，因为它会执行程序内置的固定目标，语义不够明确。
 
 移动可选参数：
 
 ```text
-vlahost-url, speed-m-s, yaw-speed-rad-s, yaw-command-hz,
-yaw-command-duration-s, position-tolerance-m, yaw-tolerance-rad,
-move-timeout-s, yaw-timeout-s, http-timeout-s,
-pose-ready-timeout-s, pose-stable-s, odometry-retries
+vlahost-url, speed-m-s, release-parking, service-timeout,
+http-timeout-s, pose-ready-timeout-s, pose-stable-s, move-timeout-s,
+position-tolerance-m, yaw-tolerance-rad, yaw-reference-rad,
+yaw-max-travel-rad, max-attempts
 ```
 
 `pose_ids` 还支持 `pause-s`。
+
+### 相对移动底盘 x/y
+
+`POST /move_xy` 根据 VLAHost `/base_world_pose` 当前世界位姿，沿世界 x/y 轴计算目标；
+`x_m`、`y_m` 可以为负数，目标保持当前 z 和 yaw。将世界坐标偏移转换为 body-frame 后发送一个 MoveRelative goal；这不是全局路径规划。
+也兼容不带单位后缀的 `x`、`y`，同一轴不能同时传两种字段。
+
+```http
+POST /move_xy
+X-API-Key: <key>
+Content-Type: application/json
+
+{"x_m":0.20,"y_m":-0.10}
+```
+
+可选参数与 `/move` 相同：
+
+```json
+{
+  "x_m": 0.20,
+  "y_m": -0.10,
+  "options": {
+    "position-tolerance-m": 0.05
+  }
+}
+```
 
 ### AprilTag 抓取并抬起
 
@@ -119,7 +153,8 @@ Content-Type: application/json
 
 ```json
 [
-  {"tool":"move","pose_ids":[3],"options":{"speed-m-s":0.06}},
+  {"tool":"move","pose_ids":[3],"options":{"position-tolerance-m":0.05}},
+  {"tool":"move_xy","x_m":0.20,"y_m":-0.10},
   {"tool":"grasp","tag_id":5,"options":{"offset-config":"tag5_left_tool_offset.yaml"}},
   {"tool":"move","pose_ids":[1]}
 ]
@@ -161,6 +196,12 @@ curl --noproxy '*' -sS -X POST \
 
 curl --noproxy '*' -sS -X POST \
   -H "X-API-Key: $ROBOT_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"x_m":0.20,"y_m":-0.10}' \
+  "$ROBOT_API_BASE/move_xy"
+
+curl --noproxy '*' -sS -X POST \
+  -H "X-API-Key: $ROBOT_API_KEY" \
   "$ROBOT_API_BASE/cancel"
 ```
 
@@ -186,4 +227,4 @@ with httpx.Client(base_url=base_url, headers=headers, trust_env=False) as client
 
 ## 服务端运维信息
 
-服务运行在机器人电脑 `/home/liuqian/copy/test`，启动入口为 `agent_tools/start_api.sh`，日志为 `agent_tools/api.log`。密钥配置位于 `/home/liuqian/.config/robot-agent-tools/api.env`，权限应为 600。LLM 调用端不应读取或修改这些服务端文件。
+服务在机器人电脑的 `move_agent/robot_server` 目录运行，启动入口为 `agent_tools/start_api.sh`，日志为 `agent_tools/api.log`。密钥配置位于 `/home/liuqian/.config/robot-agent-tools/api.env`，权限应为 600。LLM 调用端不应读取或修改这些服务端文件。

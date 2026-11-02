@@ -1,4 +1,4 @@
-# 用途：按 JSON 列表串行调度 move/grasp，失败即停止；运行：python3 -m agent_tools.scheduler agent_tools/tasks.example.json。
+# 用途：按 JSON 列表串行调度导航、控制源切换、抓取、躯干、回 home 等任务，失败即停止；运行：python3 -m agent_tools.scheduler agent_tools/tasks.example.json。
 """默认仅预览命令，添加 --execute 才启动控制脚本。"""
 
 import argparse
@@ -13,15 +13,32 @@ if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.common import run_command
+from tools.arm_teleop_tool import ArmTeleopTool
+from tools.control_sources_tool import ControlSourcesTool
+from tools.go_home_tool import GoHomeTool
+from tools.gripper_tool import GripperTool
 from tools.grasp_tool import GraspTool
+from tools.head_object_grasp_tool import HeadObjectGraspTool
 from tools.move_tool import MoveTool
+from tools.move_xy_tool import MoveXYTool
+from tools.torso_tool import TorsoTool
 
 
 class TaskScheduler:
     """先校验整个任务列表，再按顺序执行；不自动重试机器人动作。"""
 
     def __init__(self):
-        self.tools = {'move': MoveTool(), 'grasp': GraspTool()}
+        self.tools = {
+            'move': MoveTool(),
+            'move_xy': MoveXYTool(),
+            'control_sources': ControlSourcesTool(),
+            'grasp': GraspTool(),
+            'head_object_grasp': HeadObjectGraspTool(),
+            'torso_home_down': TorsoTool(),
+            'go_home': GoHomeTool(),
+            'arm_teleop': ArmTeleopTool(),
+            'gripper': GripperTool(),
+        }
         self.cancel_event = threading.Event()
 
     def reset_cancel(self):
@@ -39,7 +56,10 @@ class TaskScheduler:
                 raise ValueError(f'任务 {index} 必须是包含 tool 的对象')
             tool = self.tools.get(task['tool'])
             if tool is None:
-                raise ValueError(f'任务 {index} 的 tool 只能是 move 或 grasp')
+                raise ValueError(
+                    f'任务 {index} 的 tool 只能是 move、move_xy、control_sources、grasp、'
+                    'head_object_grasp、torso_home_down、go_home、'
+                    'arm_teleop 或 gripper')
             try:
                 commands.append(tool.build_command(task))
             except ValueError as error:

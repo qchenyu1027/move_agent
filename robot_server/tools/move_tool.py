@@ -1,23 +1,22 @@
 # 用途：封装默认位姿列表与显式世界位姿移动；运行：python3 -m agent_tools.scheduler --help。
-"""复用原移动脚本，不复制底盘闭环控制。"""
+"""构建底盘原生世界坐标导航任务命令。"""
 
 import math
 import sys
 
 from tools.common import SCRIPTS_DIR, option_arguments, run_command, script_command
 
-# 控制脚本之间按同目录模块互相导入（import base_move_world），校验时用同样方式加载。
+# 位姿数据为纯 Python 模块，预览不需要加载 ROS。
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
-import base_move_world
-import base_move_world_pose_list
+import native_nav_targets
 
 
 MOVE_OPTIONS = {
-    'vlahost-url', 'speed-m-s', 'yaw-speed-rad-s', 'yaw-command-hz',
-    'yaw-command-duration-s', 'position-tolerance-m', 'yaw-tolerance-rad',
-    'move-timeout-s', 'yaw-timeout-s', 'http-timeout-s',
-    'pose-ready-timeout-s', 'pose-stable-s', 'odometry-retries',
+    'vlahost-url', 'speed-m-s', 'release-parking', 'service-timeout',
+    'http-timeout-s', 'pose-ready-timeout-s', 'pose-stable-s',
+    'move-timeout-s', 'position-tolerance-m', 'yaw-tolerance-rad',
+    'yaw-reference-rad', 'yaw-max-travel-rad', 'max-attempts', 'pause-s',
 }
 
 
@@ -35,17 +34,17 @@ class MoveTool:
         if 'fixed' in task:
             if task['fixed'] is not True:
                 raise ValueError('fixed 必须为 true')
-            command = script_command('base_move_world.py')
+            command = script_command('native_nav_test.py') + ['--fixed']
             allowed = MOVE_OPTIONS
         elif 'pose_ids' in task:
             ids = task['pose_ids']
             if not isinstance(ids, list):
                 raise ValueError('pose_ids 必须是非空整数列表')
-            base_move_world_pose_list.parse_move_list(repr(ids))
+            native_nav_targets.parse_move_list(repr(ids))
             for index in ids:
-                base_move_world_pose_list.pose_to_target(
-                    base_move_world_pose_list.DEFAULT_POSES[index - 1], index)
-            command = script_command('base_move_world_pose_list.py') + [repr(ids)]
+                native_nav_targets.pose_to_target(
+                    native_nav_targets.DEFAULT_POSES[index - 1], index)
+            command = script_command('native_nav_test.py') + ['--pose-ids', repr(ids)]
             allowed = MOVE_OPTIONS | {'pause-s'}
         else:
             pose = task['pose']
@@ -53,10 +52,11 @@ class MoveTool:
                     or any(isinstance(v, bool) or not isinstance(v, (int, float))
                            or not math.isfinite(v) for v in pose)):
                 raise ValueError('pose 必须是 7 个有限数值：x y z qx qy qz qw')
-            base_move_world.pose_values_to_target(pose)
-            command = script_command('base_move_world.py') + [str(v) for v in pose]
+            native_nav_targets.quaternion_values_to_target(pose)
+            command = script_command('native_nav_test.py') + ['--pose-quat', *map(str, pose)]
             allowed = MOVE_OPTIONS
-        return command + option_arguments(options, allowed)
+        return (command + option_arguments(options, allowed, flags={'release-parking'})
+                + ['--wait', '--execute'])
 
     def run(self, task):
         """显式调用此方法即执行真实移动。"""

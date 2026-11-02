@@ -1,0 +1,13 @@
+[
+  {
+    "tool": "arm_teleop",
+    "side": "left",
+    "options": {
+      "control-backend": "auto",
+      "move-z-mm": 50,
+      "once-timeout-s": 30,
+      "once-tolerance-mm": 8,
+      "once-settle-s": 0.3
+    }
+  }
+]

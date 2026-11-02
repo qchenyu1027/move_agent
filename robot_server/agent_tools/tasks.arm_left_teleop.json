@@ -1,0 +1,12 @@
+[
+  {
+    "tool": "arm_teleop",
+    "side": "left",
+    "options": {
+      "control-backend": "auto",
+      "incremental": true,
+      "position-step-mm": 2.0,
+      "angle-step-deg": 1.0
+    }
+  }
+]

@@ -1,0 +1,11 @@
+[
+  {
+    "tool": "gripper",
+    "side": "left",
+    "action": "set",
+    "position": 0.4,
+    "options": {
+      "speed": 0.4
+    }
+  }
+]

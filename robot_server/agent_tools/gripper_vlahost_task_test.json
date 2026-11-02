@@ -1,0 +1,13 @@
+[
+  {
+    "tool": "gripper",
+    "side": "left",
+    "action": "set",
+    "position": 0.0,
+    "options": {
+      "control-backend": "vlahost",
+      "vlahost-url": "http://6.6.7.100:8011",
+      "speed": 0.4
+    }
+  }
+]

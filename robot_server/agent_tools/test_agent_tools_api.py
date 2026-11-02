@@ -8,15 +8,31 @@ from unittest.mock import patch
 
 import httpx
 
-from agent_tools.api import create_app
+from agent_tools.api import create_app, inspect_native_nav_health
 
 
 class AgentToolsApiTest(unittest.IsolatedAsyncioTestCase):
+    async def test_native_health_checks_relative_action(self):
+        names = {
+            'action': ['/move/MoveRelativeCmd'],
+            'topic': ['/move/State'],
+        }
+        with patch('agent_tools.api._http_json', return_value={'pose': {'valid': True, 'frame_id': 'camera_init', 'child_frame_id': 'body', 'received_age_s': 0.1}}), \
+             patch('agent_tools.api._ros_names', side_effect=lambda kind: names[kind]) as ros:
+            self.assertTrue(inspect_native_nav_health(False)['ready_for_motion'])
+        self.assertEqual([call.args[0] for call in ros.call_args_list],
+                         ['action', 'topic'])
+
     async def asyncSetUp(self):
         self.health_patch = patch('agent_tools.api.inspect_robot_health', return_value={
             'ok': True, 'ready_for_motion': True, 'errors': [], 'warnings': [],
         })
         self.health_patch.start()
+        self.native_health_patch = patch('agent_tools.api.inspect_native_nav_health',
+                                         return_value={
+            'ok': True, 'ready_for_motion': True, 'errors': [], 'warnings': [],
+        })
+        self.native_health_patch.start()
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=create_app('test-secret')),
             base_url='http://robot.test')
@@ -25,6 +41,7 @@ class AgentToolsApiTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.aclose()
         self.health_patch.stop()
+        self.native_health_patch.stop()
 
     async def test_health_and_authentication(self):
         health = {'ok': True, 'ready_for_motion': True}
@@ -41,6 +58,37 @@ class AgentToolsApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json(), {'ok': True, 'message': '已到达目标位置'})
         run.assert_called_once_with([{'tool': 'move', 'fixed': True}], execute=True)
 
+    async def test_move_xy_executes_relative_offset(self):
+        with patch('agent_tools.api.TaskScheduler.run', return_value=0) as run:
+            response = await self.client.post(
+                '/move_xy', headers=self.headers,
+                json={'x_m': 0.2, 'y_m': -0.1})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            'ok': True, 'message': '已完成底盘 x/y 相对移动'})
+        run.assert_called_once_with([{
+            'x_m': 0.2, 'y_m': -0.1, 'tool': 'move_xy',
+        }], execute=True)
+
+    async def test_move_xy_requires_both_offsets(self):
+        with patch('agent_tools.api.TaskScheduler.run') as run:
+            response = await self.client.post(
+                '/move_xy', headers=self.headers, json={'x_m': 0.2})
+        self.assertEqual(response.status_code, 422)
+        run.assert_not_called()
+
+    async def test_torso_home_down_executes_requested_offset(self):
+        with patch('agent_tools.api.TaskScheduler.run', return_value=0) as run:
+            response = await self.client.post(
+                '/torso_home_down', headers=self.headers,
+                json={'offset_mm': -10})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            'ok': True, 'message': '已回 home 并完成躯干下降'})
+        run.assert_called_once_with([{
+            'offset_mm': -10, 'tool': 'torso_home_down',
+        }], execute=True)
+
     async def test_move_cannot_override_tool(self):
         with patch('agent_tools.api.TaskScheduler.run', return_value=0) as run:
             response = await self.client.post(
@@ -51,7 +99,7 @@ class AgentToolsApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_move_does_not_execute(self):
         with patch('agent_tools.api.TaskScheduler.run') as run:
             response = await self.client.post(
-                '/move', headers=self.headers, json={'pose_ids': [4]})
+                '/move', headers=self.headers, json={'pose_ids': [6]})
         self.assertEqual(response.status_code, 422)
         run.assert_not_called()
 
@@ -60,12 +108,21 @@ class AgentToolsApiTest(unittest.IsolatedAsyncioTestCase):
             'ok': False, 'ready_for_motion': False,
             'errors': [], 'warnings': ['duplicate controller'],
         }
-        with patch('agent_tools.api.inspect_robot_health', return_value=health), \
+        with patch('agent_tools.api.inspect_native_nav_health', return_value=health), \
                 patch('agent_tools.api.TaskScheduler.run') as run:
             response = await self.client.post('/move', headers=self.headers)
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()['health'], health)
         run.assert_not_called()
+
+    async def test_native_move_does_not_require_vlahost_health(self):
+        with patch('agent_tools.api.inspect_robot_health', side_effect=AssertionError(
+                'native navigation must use its own ROS health check')) as legacy, \
+                patch('agent_tools.api.TaskScheduler.run', return_value=0):
+            response = await self.client.post('/move', headers=self.headers,
+                                              json={'pose_ids': [3, 2, 1]})
+        self.assertEqual(response.status_code, 200)
+        legacy.assert_not_called()
 
     async def test_grasp_failure_reports_exit_code(self):
         with patch('agent_tools.api.TaskScheduler.run', return_value=3) as run:
@@ -88,8 +145,23 @@ class AgentToolsApiTest(unittest.IsolatedAsyncioTestCase):
             'tag_id': 5, 'grasp_and_lift': False, 'tool': 'grasp',
         }], execute=True)
 
+    async def test_head_object_grasp_executes_with_z_offset(self):
+        with patch('agent_tools.api.TaskScheduler.run', return_value=0) as run:
+            response = await self.client.post(
+                '/head_object_grasp', headers=self.headers,
+                json={'side': 'left', 'grasp_offset_mm': [0, 0, -40],
+                      'options': {'position-only': True}})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            'ok': True, 'message': '头部视觉物体抓取已完成'})
+        run.assert_called_once_with([{
+            'side': 'left', 'grasp_offset_mm': [0, 0, -40],
+            'options': {'position-only': True},
+            'tool': 'head_object_grasp',
+        }], execute=True)
+
     async def test_plan_validation_prevents_any_action(self):
-        tasks = [{'tool': 'move', 'fixed': True}, {'tool': 'move', 'pose_ids': [4]}]
+        tasks = [{'tool': 'move', 'fixed': True}, {'tool': 'move', 'pose_ids': [6]}]
         with patch('agent_tools.api.TaskScheduler.run') as run:
             response = await self.client.post('/tasks', headers=self.headers, json=tasks)
         self.assertEqual(response.status_code, 422)

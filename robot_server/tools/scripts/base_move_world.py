@@ -151,6 +151,10 @@ def parse_args():
     parser.add_argument('--target-yaw-rad', type=float,
                         default=DEFAULT_TARGET_YAW_RAD,
                         help=f'目标世界 yaw，默认 {DEFAULT_TARGET_YAW_RAD} rad')
+    parser.add_argument('--offset-x-m', type=float,
+                        help='相对当前世界坐标 x 的平移量（米）；必须与 --offset-y-m 一起使用')
+    parser.add_argument('--offset-y-m', type=float,
+                        help='相对当前世界坐标 y 的平移量（米）；必须与 --offset-x-m 一起使用')
     parser.add_argument('--speed-m-s', type=float, default=MIN_LATERAL_SPEED_M_S,
                         help='x/y 平移速度，范围 0.06..0.10 m/s')
     parser.add_argument('--yaw-speed-rad-s', type=float, default=0.20,
@@ -181,6 +185,10 @@ def parse_args():
     parser.add_argument('--odometry-retries', type=int, default=0,
                         help='平移里程计中断后的最大自动恢复次数，默认 0')
     args = parser.parse_args()
+    if args.pose_values and (args.offset_x_m is not None or args.offset_y_m is not None):
+        parser.error('目标位姿和相对 x/y 偏移不能同时指定')
+    if (args.offset_x_m is None) != (args.offset_y_m is None):
+        parser.error('--offset-x-m 和 --offset-y-m 必须同时指定')
     if args.pose_values:
         try:
             (args.target_x_m, args.target_y_m, args.target_z_m,
@@ -197,6 +205,10 @@ def parse_args():
     for name in finite_positive:
         value = getattr(args, name)
         if not math.isfinite(value):
+            parser.error(f'--{name.replace("_", "-")} 必须为有限数值')
+    for name in ('offset_x_m', 'offset_y_m'):
+        value = getattr(args, name)
+        if value is not None and not math.isfinite(value):
             parser.error(f'--{name.replace("_", "-")} 必须为有限数值')
     if not MIN_LATERAL_SPEED_M_S <= args.speed_m_s <= MAX_LATERAL_SPEED_M_S:
         parser.error('--speed-m-s 必须在 0.06..0.10 m/s 内')
@@ -547,6 +559,14 @@ class BaseWorldMover:
 
     def run(self):
         pose = self.wait_for_fresh_pose()
+        current_x, current_y, current_z, current_yaw = validate_base_world_pose(pose)
+        offset_x_m = getattr(self.args, 'offset_x_m', None)
+        if offset_x_m is not None:
+            # 相对 x/y 工具保持当前高度和朝向，只改变平移目标。
+            self.args.target_x_m = current_x + offset_x_m
+            self.args.target_y_m = current_y + getattr(self.args, 'offset_y_m')
+            self.args.target_z_m = current_z
+            self.args.target_yaw_rad = current_yaw
         _, _, z, _ = validate_base_world_pose(pose)
         if abs(z - self.args.target_z_m) > self.args.position_tolerance_m:
             raise RuntimeError(

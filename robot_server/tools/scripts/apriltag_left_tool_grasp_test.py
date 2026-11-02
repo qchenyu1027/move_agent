@@ -1,27 +1,26 @@
 #!/usr/bin/python3
 # 用途：通过 AprilTag 执行左手抓取、松爪与回位流程；已合并原 left_tool_accuracy_test.py（左手 QP 控制）和 apriltag_left_tool_accuracy_test.py（Tag 识别与目标位姿），不再依赖同目录其他脚本。
-# 运行：source /home/liuqian/WBC/Apex_Deploy/apex_ros_env.sh && python3 tools/scripts/apriltag_left_tool_grasp_test.py --help
+# 运行：source /home/liuqian/WBC/Apex_Deploy/apex_ros_env.sh && /usr/bin/python3 tools/scripts/apriltag_left_tool_grasp_test.py --help
 """AprilTag 左手抓放：放置后上移 50 mm，复位底盘后再回 home。"""
 
 import argparse
 from collections import deque
-import json
 import math
 import os
 from pathlib import Path
 import sys
 import time
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import numpy as np
 import rclpy
+from rclpy.action import ActionClient
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseArray
 from marvin_msgs.msg import IKRequest, JointcmdArm, Jointfeedback
+from navigation.action import WalkToTargetPose
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import (
@@ -30,6 +29,7 @@ from rclpy.qos import (
 from rclpy.time import Time
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import Image
+from slam.msg import LocationData
 from std_msgs.msg import (
     Float32, Float32MultiArray, Int16MultiArray, Int32, Int32MultiArray,
 )
@@ -956,7 +956,7 @@ def parse_args():
         help='手臂返回后底盘向右横移的名义距离，默认 350 mm')
     parser.add_argument(
         '--base-lateral-speed-m-s', type=float, default=0.06,
-        help='底盘横移速度绝对值，默认 0.06 m/s，范围 0.06..0.10 m/s')
+        help='底盘导航最大速度，默认 0.06 m/s，范围 0.06..0.10 m/s')
     parser.add_argument(
         '--base-return-world-x-m', type=float,
         default=DEFAULT_BASE_RETURN_WORLD_X_M,
@@ -974,17 +974,20 @@ def parse_args():
         default=DEFAULT_BASE_RETURN_WORLD_YAW_RAD,
         help='最后反向移动的底盘世界 yaw，默认 0.05024 rad（2.88 deg）')
     parser.add_argument(
-        '--base-return-yaw-speed-rad-s', type=float, default=0.10,
-        help='最后反向阶段底盘 yaw 闭环速度，默认 0.10 rad/s')
-    parser.add_argument(
         '--base-return-pose-tolerance-m', type=float, default=0.03,
         help='底盘世界坐标位置误差容限，默认 0.03 m')
     parser.add_argument(
         '--base-return-yaw-tolerance-rad', type=float, default=0.04,
         help='底盘世界 yaw 误差容限，默认 0.04 rad')
     parser.add_argument(
-        '--vlahost-url', default='http://127.0.0.1:8011',
-        help='VLAHost HTTP 地址，默认 http://127.0.0.1:8011')
+        '--base-action-name', default='/navigation/WalkToTargetPose',
+        help='底盘导航 Action 名称')
+    parser.add_argument(
+        '--base-location-topic', default='/slam/LocationData',
+        help='底盘世界定位话题')
+    parser.add_argument(
+        '--base-move-timeout-s', type=float, default=120.0,
+        help='每次底盘导航超时，默认 120 s')
 
     gripper, remaining = parser.parse_known_args()
     defaults = (
@@ -1012,17 +1015,17 @@ def parse_args():
             'stability_window_sec', 'stability_position_jitter_mm',
             'stability_angle_jitter_deg', 'return_speed_mm_s',
             'base_right_distance_mm', 'base_lateral_speed_m_s',
-            'base_return_world_x_m', 'base_return_world_y_m',
-            'base_return_world_z_m',
-            'base_return_world_yaw_rad', 'base_return_yaw_speed_rad_s',
-            'base_return_pose_tolerance_m', 'base_return_yaw_tolerance_rad'):
+            'base_return_pose_tolerance_m',
+            'base_return_yaw_tolerance_rad', 'base_move_timeout_s'):
         value = getattr(gripper, name)
         if not math.isfinite(value) or value <= 0.0:
             parser.error(f'--{name.replace("_", "-")} 必须为有限正数')
+    for name in ('base_return_world_x_m', 'base_return_world_y_m',
+                 'base_return_world_z_m', 'base_return_world_yaw_rad'):
+        if not math.isfinite(getattr(gripper, name)):
+            parser.error(f'--{name.replace("_", "-")} 必须为有限数值')
     if not 0.06 <= gripper.base_lateral_speed_m_s <= 0.10:
         parser.error('--base-lateral-speed-m-s 必须在 0.06..0.10 m/s 内')
-    if gripper.base_return_yaw_speed_rad_s > 0.20:
-        parser.error('--base-return-yaw-speed-rad-s 不能超过底盘 0.20 rad/s 限制')
     if (not math.isfinite(gripper.approach_height_mm) or
             gripper.approach_height_mm < 0.0):
         parser.error('--approach-height-mm 必须为大于等于 0 的有限数值')
@@ -1056,32 +1059,6 @@ def load_return_pose(path):
     return snapshot_path, position, quaternion
 
 
-def request_json(base_url, path, body, timeout=3.0):
-    """调用本机 VLAHost，并将 HTTP/JSON 错误转换为可读异常。"""
-    data = json.dumps(body).encode('utf-8')
-    request = Request(
-        base_url.rstrip('/') + path, data=data,
-        headers={'Content-Type': 'application/json'})
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.load(response)
-    except HTTPError as error:
-        detail = error.read().decode('utf-8', errors='replace')
-        raise ValueError(f'VLAHost HTTP {error.code}: {detail}') from error
-    except (URLError, OSError, json.JSONDecodeError) as error:
-        raise ValueError(f'无法访问 VLAHost：{error}') from error
-
-
-def get_json(base_url, path, timeout=3.0):
-    """读取 VLAHost 状态接口。"""
-    request = Request(base_url.rstrip('/') + path, method='GET')
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.load(response)
-    except (HTTPError, URLError, OSError, json.JSONDecodeError) as error:
-        raise ValueError(f'无法读取 VLAHost 状态：{error}') from error
-
-
 class TagGrasp(TagAccuracy):
     """执行抓取、返回快照位姿，以及完成后的底盘右移。"""
 
@@ -1097,16 +1074,12 @@ class TagGrasp(TagAccuracy):
         self.return_goal_quaternion = None
         self.return_duration = 0.0
         self.base_move_started_at = None
-        self.base_move_duration = 0.0
-        self.base_move_sequence = None
-        self.last_base_move_poll_at = float('-inf')
-        self.base_yaw_started_at = None
-        self.base_yaw_direction_sign = 1.0
-        self.base_yaw_direction_locked = False
-        self.base_yaw_last_yaw = None
-        self.base_yaw_last_command = 0.0
-        self.base_yaw_last_motion_at = None
-        self.base_return_world_pose = None
+        self.base_goal_future = None
+        self.base_goal_handle = None
+        self.base_result_future = None
+        self.base_cancel_future = None
+        self.base_cancel_requested = False
+        self.base_location = None
         self.open_started_at = None
         self.recorded_return_position = tuple(return_position)
         self.recorded_return_quaternion = tuple(return_quaternion)
@@ -1132,6 +1105,12 @@ class TagGrasp(TagAccuracy):
         self.approach_waypoint_active = False
         self.approach_final_position = None
         super().__init__(motion, goal)
+
+        self.base_action_client = ActionClient(
+            self, WalkToTargetPose, gripper.base_action_name)
+        self.create_subscription(
+            LocationData, gripper.base_location_topic,
+            self.on_base_location, 10)
 
         # 直接调用 Apex QP 控制器提供的 ROS 服务，不经过 VLAHost HTTP 接口。
         self.go_home_client = self.create_client(
@@ -1166,13 +1145,13 @@ class TagGrasp(TagAccuracy):
             '松爪后直接调用 ROS %s 执行真实机器人 home 服务' %
             topic_name(motion.namespace, 'control/go_home'))
         self.get_logger().info(
-            '返回完成后底盘向右横移 %.1f mm：vy=-%.3f m/s，VLAHost=%s' %
+            '返回完成后底盘沿世界 -Y 移动 %.1f mm：导航速度 %.3f m/s，Action=%s' %
             (gripper.base_right_distance_mm,
-             gripper.base_lateral_speed_m_s, gripper.vlahost_url))
+             gripper.base_lateral_speed_m_s, gripper.base_action_name))
         self.get_logger().info(
             '最后反向返回底盘世界坐标：x=%.5f m，y=%.5f m，z=%.5f m（仅检查），'
             'yaw=%.5f rad（%.2f°）；'
-            '通过 /base_world_pose 闭环' %
+            '通过导航 Action 执行' %
             (gripper.base_return_world_x_m,
              gripper.base_return_world_y_m,
              gripper.base_return_world_z_m,
@@ -1285,266 +1264,184 @@ class TagGrasp(TagAccuracy):
             if self.phase == 'returning':
                 self.start_base_right_move(reason)
                 return
-        if code != 0 and self.phase in (
-                'base_moving', 'base_returning', 'base_yaw_returning'):
+        if code != 0 and self.phase in ('base_moving', 'base_returning'):
             self.stop_base_motion()
         super().finish(code, reason)
 
-    def start_base_right_move(self, arm_reason):
-        """手臂返回完成后，通过 VLAHost 启动闭环世界坐标右移。"""
-        distance_m = self.gripper_args.base_right_distance_mm / 1000.0
-        body = {
-            'offset_xy_m': [0.0, -distance_m],
-            'speed_mps': self.gripper_args.base_lateral_speed_m_s,
+    def on_base_location(self, message):
+        """底盘定位消息以 orientation.z 表示世界 yaw。"""
+        pose = message.pose
+        self.base_location = {
+            'x': float(pose.position.x),
+            'y': float(pose.position.y),
+            'z': float(pose.position.z),
+            'yaw': float(pose.orientation.z),
+            'is_relocating': bool(message.is_relocating),
+            'received_at': time.monotonic(),
         }
-        try:
-            result = request_json(
-                self.gripper_args.vlahost_url, '/base_move_world', body)
-        except ValueError as error:
-            super().finish(3, f'手臂已返回，但底盘右移启动失败：{error}')
-            return
-        move = result.get('move', {})
-        if not result.get('success') or move.get('status') != 'active':
-            super().finish(
-                3, '手臂已返回，但 VLAHost 未主动执行底盘动作：'
-                f'{result}')
-            return
-        self.phase = 'base_moving'
-        self.base_move_started_at = time.monotonic()
-        self.base_move_duration = self.gripper_args.base_right_distance_mm / self.gripper_args.base_lateral_speed_m_s
-        self.base_move_sequence = move
-        self.get_logger().warning(
-            '%s；底盘闭环向右横移 %.1f mm，offset_xy_m=[0.0, %.3f]，'
-            'speed=%.3f m/s，VLAHost=%s' %
-            (arm_reason, self.gripper_args.base_right_distance_mm,
-             -distance_m, self.gripper_args.base_lateral_speed_m_s,
-             self.gripper_args.vlahost_url))
 
-    def start_base_return_move(self, arm_reason):
-        """底盘反向阶段闭环回到指定世界 x/y；完成后再闭环修正 yaw。"""
-        try:
-            pose = get_json(self.gripper_args.vlahost_url, '/base_world_pose').get('pose')
-            self.validate_base_world_pose(pose)
-        except ValueError as error:
-            super().finish(3, f'底盘反向返回前无法读取世界坐标：{error}')
-            return
-
-        current_x = float(pose['position']['x'])
-        current_y = float(pose['position']['y'])
-        offset_x = self.gripper_args.base_return_world_x_m - current_x
-        offset_y = self.gripper_args.base_return_world_y_m - current_y
-        self.base_return_world_pose = pose
-        offset_distance = math.hypot(offset_x, offset_y)
-        # /base_move_world 要求单次位移至少 50 mm；小误差直接跳过平移，随后修正 yaw。
-        if offset_distance <= 0.03:
-            self.get_logger().info(
-                '底盘 x/y 已在目标容限内：current=[%.5f, %.5f] m '
-                'target=[%.5f, %.5f] m；跳过平移' %
-                (current_x, current_y,
-                 self.gripper_args.base_return_world_x_m,
-                 self.gripper_args.base_return_world_y_m))
-            self.start_base_yaw_return(arm_reason)
-            return
-        if offset_distance < 0.05:
-            super().finish(
-                3, '底盘世界 x/y 误差 %.3f m 位于 0.03..0.05 m，'
-                '/base_move_world 最小单次位移为 0.05 m，未强行越过目标' %
-                offset_distance)
-            return
-        if offset_distance > 0.50:
-            super().finish(
-                3, '底盘世界 x/y 需要移动 %.3f m，超过 /base_move_world 单次 0.50 m 限制' %
-                offset_distance)
-            return
-        body = {
-            'offset_xy_m': [offset_x, offset_y],
-            'speed_mps': self.gripper_args.base_lateral_speed_m_s,
-        }
-        try:
-            result = request_json(
-                self.gripper_args.vlahost_url, '/base_move_world', body)
-        except ValueError as error:
-            super().finish(3, f'手臂回 home 后底盘世界 x/y 返回失败：{error}')
-            return
-        move = result.get('move', {})
-        if not result.get('success') or move.get('status') != 'active':
-            super().finish(3, f'底盘世界 x/y 返回未启动：{result}')
-            return
-        self.phase = 'base_returning'
-        self.base_move_started_at = time.monotonic()
-        self.last_base_move_poll_at = float('-inf')
-        self.get_logger().warning(
-            '%s；底盘闭环返回世界 x/y：current=[%.5f, %.5f] m，'
-            'target=[%.5f, %.5f] m，offset=[%.3f, %.3f] m，speed=%.3f m/s' %
-            (arm_reason, current_x, current_y,
-             self.gripper_args.base_return_world_x_m,
-             self.gripper_args.base_return_world_y_m,
-             offset_x, offset_y, self.gripper_args.base_lateral_speed_m_s))
-
-    @staticmethod
-    def validate_base_world_pose(pose):
-        if not isinstance(pose, dict) or not pose.get('valid'):
-            raise ValueError('世界底盘位姿无效')
-        if pose.get('frame_id') != 'camera_init' or pose.get('child_frame_id') != 'body':
-            raise ValueError(
-                '世界底盘位姿坐标系异常，需要 camera_init -> body，实际为 '
-                f'{pose.get("frame_id")} -> {pose.get("child_frame_id")}')
-        if pose.get('received_age_s') is not None and pose['received_age_s'] > 0.5:
-            raise ValueError(f'世界底盘位姿过期：{pose["received_age_s"]:.3f} s')
-        position = pose.get('position')
-        if not isinstance(position, dict) or not all(
-                math.isfinite(float(position.get(axis))) for axis in ('x', 'y', 'z')):
-            raise ValueError('世界底盘位置包含非有限值')
-        if not math.isfinite(float(pose.get('yaw_rad'))):
-            raise ValueError('世界底盘 yaw 无效')
+    def current_base_location(self):
+        """返回最近的有效世界定位，过期或重定位时禁止发送目标。"""
+        pose = self.base_location
+        if pose is None or pose['is_relocating']:
+            raise ValueError('底盘世界定位不可用或正在重定位')
+        if time.monotonic() - pose['received_at'] > 1.0:
+            raise ValueError('底盘世界定位超过 1 s 未更新')
+        if not all(math.isfinite(pose[key]) for key in ('x', 'y', 'z', 'yaw')):
+            raise ValueError('底盘世界定位包含非有限数值')
+        return pose
 
     @staticmethod
     def wrapped_angle(angle):
         return math.atan2(math.sin(angle), math.cos(angle))
 
-    def start_base_yaw_return(self, arm_reason):
-        """平移完成后，使用 VLAHost base_velocity 闭环修正世界 yaw。"""
+    def start_base_navigation(self, x, y, z, yaw, phase, reason):
+        """向底盘发送一个完整世界目标；Action 自行规划并避障。"""
         try:
-            pose = get_json(self.gripper_args.vlahost_url, '/base_world_pose').get('pose')
-            self.validate_base_world_pose(pose)
-        except ValueError as error:
-            super().finish(3, f'底盘 yaw 返回前无法读取世界坐标：{error}')
+            current = self.current_base_location()
+            if abs(current['z'] - z) > self.gripper_args.base_return_pose_tolerance_m:
+                raise ValueError('底盘不能调整 z，当前高度与目标差距超过容限')
+            if not self.base_action_client.wait_for_server(timeout_sec=2.0):
+                raise ValueError('底盘导航 Action 服务不可用')
+            goal = WalkToTargetPose.Goal()
+            field = 'navigtion_type' if hasattr(goal, 'navigtion_type') else 'navigation_type'
+            setattr(goal, field, 0)
+            goal.target_pose.position.x = x
+            goal.target_pose.position.y = y
+            goal.target_pose.position.z = z
+            # 底盘自定义协议将 yaw 弧度放在 orientation.w，并非标准四元数。
+            goal.target_pose.orientation.w = yaw
+            goal.max_speed = self.gripper_args.base_lateral_speed_m_s
+            goal.line_following_data.move_type = 0
+            goal.line_following_data.enable_detour = True
+            goal.line_following_data.need_precision_location = False
+            self.base_goal_future = self.base_action_client.send_goal_async(goal)
+        except (ValueError, RuntimeError) as error:
+            super().finish(3, f'{reason}启动失败：{error}')
             return
-        yaw = float(pose['yaw_rad'])
-        target = self.gripper_args.base_return_world_yaw_rad
-        error = self.wrapped_angle(target - yaw)
-        self.base_return_world_pose = pose
-        if abs(error) <= self.gripper_args.base_return_yaw_tolerance_rad:
-            self.finish_base_return(arm_reason, pose)
-            return
-        self.phase = 'base_yaw_returning'
-        self.base_yaw_started_at = time.monotonic()
-        self.base_yaw_direction_sign = 1.0
-        self.base_yaw_direction_locked = False
-        self.base_yaw_last_yaw = yaw
-        self.base_yaw_last_command = 0.0
-        self.base_yaw_last_motion_at = self.base_yaw_started_at
-        self.last_base_move_poll_at = float('-inf')
+        self.base_goal_handle = None
+        self.base_result_future = None
+        self.base_cancel_future = None
+        self.base_cancel_requested = False
+        self.base_move_started_at = time.monotonic()
+        self.phase = phase
         self.get_logger().warning(
-            '%s；底盘开始闭环修正世界 yaw：current=%.5f rad target=%.5f rad error=%.5f rad' %
-            (arm_reason, yaw, target, error))
+            '%s：目标 x=%.5f y=%.5f z=%.5f yaw=%.5f，最大速度=%.3f m/s' %
+            (reason, x, y, z, yaw, goal.max_speed))
 
-    def finish_base_return(self, arm_reason, pose):
-        self.validate_base_world_pose(pose)
-        x = float(pose['position']['x'])
-        y = float(pose['position']['y'])
-        z = float(pose['position']['z'])
-        yaw = float(pose['yaw_rad'])
-        x_error = x - self.gripper_args.base_return_world_x_m
-        y_error = y - self.gripper_args.base_return_world_y_m
-        z_error = z - self.gripper_args.base_return_world_z_m
-        yaw_error = self.wrapped_angle(
-            yaw - self.gripper_args.base_return_world_yaw_rad)
-        self.get_logger().info(
-            '底盘世界目标完成：actual x=%.5f y=%.5f z=%.5f yaw=%.5f rad；'
-            'error x=%.4f y=%.4f z=%.4f yaw=%.5f rad' %
-            (x, y, z, yaw, x_error, y_error, z_error, yaw_error))
-        if math.hypot(x_error, y_error) > self.gripper_args.base_return_pose_tolerance_m:
-            super().finish(
-                3, '底盘返回后 x/y 误差过大：%.4f m（x=%.4f, y=%.4f）' %
-                (math.hypot(x_error, y_error), x_error, y_error))
+    def start_base_right_move(self, arm_reason):
+        """以当前世界定位为起点，沿世界 -Y 发送右移目标。"""
+        try:
+            current = self.current_base_location()
+        except ValueError as error:
+            super().finish(3, f'手臂已返回，但底盘右移前定位无效：{error}')
             return
-        if abs(z_error) > self.gripper_args.base_return_pose_tolerance_m:
-            super().finish(
-                3, '底盘返回后 z 与目标不一致（底盘接口不能主动调 z）：'
-                f'actual={z:.5f} target={self.gripper_args.base_return_world_z_m:.5f}')
+        distance_m = self.gripper_args.base_right_distance_mm / 1000.0
+        self.start_base_navigation(
+            current['x'], current['y'] - distance_m, current['z'],
+            current['yaw'], 'base_moving', arm_reason)
+
+    def start_base_return_move(self, arm_reason):
+        """在一次 Action 中返回指定的世界 x/y/yaw。"""
+        args = self.gripper_args
+        self.start_base_navigation(
+            args.base_return_world_x_m, args.base_return_world_y_m,
+            args.base_return_world_z_m, args.base_return_world_yaw_rad,
+            'base_returning', arm_reason)
+
+    def finish_base_return(self):
+        """Action 成功后用最新定位检查完整世界目标。"""
+        try:
+            pose = self.current_base_location()
+        except ValueError as error:
+            super().finish(3, f'底盘返回后定位无效：{error}')
             return
-        if abs(yaw_error) > self.gripper_args.base_return_yaw_tolerance_rad:
+        args = self.gripper_args
+        xy_error = math.hypot(
+            pose['x'] - args.base_return_world_x_m,
+            pose['y'] - args.base_return_world_y_m)
+        z_error = abs(pose['z'] - args.base_return_world_z_m)
+        yaw_error = abs(self.wrapped_angle(
+            pose['yaw'] - args.base_return_world_yaw_rad))
+        if xy_error > args.base_return_pose_tolerance_m:
+            super().finish(3, f'底盘返回后 x/y 误差过大：{xy_error:.4f} m')
+        elif z_error > args.base_return_pose_tolerance_m:
+            super().finish(3, f'底盘返回后 z 误差过大：{z_error:.4f} m')
+        elif yaw_error > args.base_return_yaw_tolerance_rad:
             super().finish(3, f'底盘返回后 yaw 误差过大：{yaw_error:.5f} rad')
+        else:
+            self.start_go_home()
+
+    def base_navigation_tick(self):
+        """处理 Action 接受、结果与超时。"""
+        if time.monotonic() - self.base_move_started_at > self.gripper_args.base_move_timeout_s:
+            self.stop_base_motion()
+            super().finish(3, '底盘导航超时')
             return
-        self.start_go_home()
+        try:
+            if self.base_goal_handle is None:
+                if not self.base_goal_future.done():
+                    return
+                self.base_goal_handle = self.base_goal_future.result()
+                if self.base_goal_handle is None or not self.base_goal_handle.accepted:
+                    raise ValueError('底盘拒绝导航目标')
+                self.base_result_future = self.base_goal_handle.get_result_async()
+                return
+            if not self.base_result_future.done():
+                return
+            response = self.base_result_future.result()
+            if response.status != 4 or response.result.error_code != 0:
+                raise ValueError(
+                    f'导航失败：status={response.status} '
+                    f'error_code={response.result.error_code} '
+                    f'{response.result.error_msg}')
+        except Exception as error:
+            self.stop_base_motion()
+            super().finish(3, f'底盘导航失败：{error}')
+            return
+        completed_phase = self.phase
+        self.base_goal_handle = None
+        self.base_goal_future = None
+        self.base_result_future = None
+        self.base_move_started_at = None
+        if completed_phase == 'base_moving':
+            self.phase = 'opening'
+            self.open_started_at = time.monotonic()
+            self.get_logger().warning('底盘右移完成；开始松开左夹爪')
+        else:
+            self.finish_base_return()
 
     def stop_base_motion(self):
-        """用零速度块覆盖尚未结束的底盘动作。"""
-        if self.phase == 'base_yaw_returning':
+        """请求取消当前导航目标；主循环退出前等待取消处理。"""
+        self.base_cancel_requested = True
+        if self.base_goal_handle is not None and self.base_cancel_future is None:
             try:
-                self.publish_base_yaw_velocity(0.0)
-            except ValueError as error:
-                self.get_logger().error(f'发送底盘 yaw 零速度失败：{error}')
-        if self.base_move_started_at is None:
-            return
-        try:
-            request_json(
-                self.gripper_args.vlahost_url, '/base_move_world/cancel', {})
-        except ValueError as error:
-            self.get_logger().error(f'发送底盘零速度失败：{error}')
-        self.base_move_started_at = None
+                self.base_cancel_future = self.base_goal_handle.cancel_goal_async()
+            except Exception as error:
+                self.get_logger().error(f'取消底盘导航失败：{error}')
 
-    def publish_base_yaw_velocity(self, velocity):
-        """通过 VLAHost 单步发送底盘 yaw 速度，发送失败由调用方处理。"""
-        return request_json(
-            self.gripper_args.vlahost_url, '/action',
-            {'base_velocity': [0.0, 0.0, float(velocity)]})
-
-    def base_yaw_return_tick(self):
-        """闭环修正底盘世界 yaw，达到目标后停止并校验 x/y/z/yaw。"""
-        now = time.monotonic()
-        try:
-            pose = get_json(self.gripper_args.vlahost_url, '/base_world_pose').get('pose')
-            self.validate_base_world_pose(pose)
-        except ValueError as error:
-            super().finish(3, f'底盘 yaw 返回期间读取世界坐标失败：{error}')
+    def drain_base_cancellation(self):
+        """节点销毁前处理未完成的 goal 接受和取消应答。"""
+        if not self.base_cancel_requested:
             return
-        yaw = float(pose['yaw_rad'])
-        yaw_error = self.wrapped_angle(
-            self.gripper_args.base_return_world_yaw_rad - yaw)
-        if self.base_yaw_last_yaw is not None:
-            yaw_delta = self.wrapped_angle(yaw - self.base_yaw_last_yaw)
-            if (not self.base_yaw_direction_locked and
-                    abs(yaw_delta) >= 0.003 and
-                    abs(self.base_yaw_last_command) > 1e-9):
-                if yaw_delta * self.base_yaw_last_command < 0.0:
-                    self.base_yaw_direction_sign = -1.0
-                self.base_yaw_direction_locked = True
-                self.get_logger().warning(
-                    '已根据第一次有效 yaw 反馈锁定底盘命令方向：sign=%+.0f，'
-                    '后续不再重复切换' % self.base_yaw_direction_sign)
-                self.base_yaw_last_motion_at = now
-            self.base_yaw_last_yaw = yaw
-        if abs(yaw_error) <= self.gripper_args.base_return_yaw_tolerance_rad:
-            try:
-                self.publish_base_yaw_velocity(0.0)
-            except ValueError:
-                pass
-            self.finish_base_return('底盘 x/y 返回完成', pose)
-            return
-        if now - self.base_yaw_started_at > 10.0:
-            try:
-                self.publish_base_yaw_velocity(0.0)
-            except ValueError:
-                pass
-            super().finish(3, f'底盘 yaw 返回超时，剩余误差 {yaw_error:.5f} rad')
-            return
-        if now - self.base_yaw_last_motion_at > 3.0:
-            try:
-                self.publish_base_yaw_velocity(0.0)
-            except ValueError:
-                pass
-            super().finish(
-                3, '底盘 yaw 命令发送后 3 s 内世界 yaw 没有有效变化；'
-                f'剩余误差 {yaw_error:.5f} rad')
-            return
-        if now - self.last_base_move_poll_at < 0.1:
-            return
-        self.last_base_move_poll_at = now
-        speed = math.copysign(
-            min(self.gripper_args.base_return_yaw_speed_rad_s,
-                max(0.06, abs(yaw_error) / 0.1)), yaw_error)
-        speed *= self.base_yaw_direction_sign
-        try:
-            result = self.publish_base_yaw_velocity(speed)
-        except ValueError as error:
-            super().finish(3, f'底盘 yaw 速度命令失败：{error}')
-            return
-        if not result.get('success'):
-            super().finish(3, f'底盘 yaw 速度命令未执行：{result}')
-            return
-        self.base_yaw_last_command = speed
+        deadline = time.monotonic() + 3.0
+        while rclpy.ok() and time.monotonic() < deadline:
+            if self.base_goal_handle is None and self.base_goal_future is not None:
+                if self.base_goal_future.done():
+                    try:
+                        self.base_goal_handle = self.base_goal_future.result()
+                    except Exception as error:
+                        self.get_logger().error(f'读取底盘目标状态失败：{error}')
+                        return
+                    if self.base_goal_handle is None or not self.base_goal_handle.accepted:
+                        return
+                    self.stop_base_motion()
+            if self.base_cancel_future is not None and self.base_cancel_future.done():
+                return
+            if self.base_goal_future is None:
+                return
+            rclpy.spin_once(self, timeout_sec=0.1)
+        self.get_logger().error('底盘导航取消请求未在 3 s 内确认')
 
     def start_go_home(self):
         """底盘反向返回完成后，直接调用 ROS go_home 服务。"""
@@ -1874,35 +1771,7 @@ class TagGrasp(TagAccuracy):
                     self.exit_code is None):
                 self.maybe_accept_stable_plateau()
         elif self.phase in ('base_moving', 'base_returning'):
-            now = time.monotonic()
-            if now - self.last_base_move_poll_at < 0.2:
-                return
-            self.last_base_move_poll_at = now
-            try:
-                state = get_json(
-                    self.gripper_args.vlahost_url, '/base_move_world')
-            except ValueError as error:
-                self.get_logger().warning(f'等待底盘闭环状态失败：{error}')
-                return
-            move = state.get('move', {})
-            status = move.get('status')
-            if status == 'reached':
-                self.base_move_started_at = None
-                if self.phase == 'base_moving':
-                    self.phase = 'opening'
-                    self.open_started_at = now
-                    self.get_logger().warning(
-                        '底盘右移完成；开始将左夹爪从 1.0 缓慢松开到 0.0')
-                else:
-                    self.start_base_yaw_return('底盘世界 x/y 返回完成')
-            elif status in ('failed', 'cancelled'):
-                self.stop_base_motion()
-                super().finish(
-                    3, '底盘闭环%s未完成：%s；%s' %
-                    ('右移' if self.phase == 'base_moving' else '反向返回',
-                     status, move.get('reason', '未知原因')))
-        elif self.phase == 'base_yaw_returning':
-            self.base_yaw_return_tick()
+            self.base_navigation_tick()
         elif self.phase == 'opening':
             self.opening_tick()
         elif self.phase == 'go_home':
@@ -1950,6 +1819,7 @@ def main():
         if node is not None:
             if hasattr(node, 'stop_base_motion'):
                 node.stop_base_motion()
+                node.drain_base_cancellation()
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -21,10 +21,18 @@ from agent_tools.scheduler import TaskScheduler
 
 
 LOGGER = logging.getLogger(__name__)
-VLAHOST_URL = os.environ.get('VLAHOST_URL', 'http://127.0.0.1:8011').rstrip('/')
+VLAHOST_URL = os.environ.get('VLAHOST_URL', 'http://6.6.7.100:8011').rstrip('/')
 REQUIRED_ROS_NODES = {'/luna_vlahost', '/base_teleop', '/base_controller'}
-REQUIRED_ROS_SERVICES = {'/control/base_teleop/set_mode'}
-REQUIRED_ROS_TOPICS = {'/odomAftUpdate', '/info/base_teleop/active_mode', '/tj/joint_states'}
+REQUIRED_ROS_SERVICES = {
+    '/control/base_teleop/set_mode',
+}
+REQUIRED_ROS_TOPICS = {
+    '/odomAftUpdate',
+    '/info/base_teleop/active_mode',
+    '/tj/joint_states',
+}
+NATIVE_NAV_ACTIONS = {'/move/MoveRelativeCmd'}
+NATIVE_NAV_TOPICS = {'/move/State'}
 
 
 def _http_json(path):
@@ -117,6 +125,44 @@ def inspect_robot_health(busy):
     }
 
 
+def inspect_native_nav_health(busy):
+    """检查 MoveRelative 和 VLAHost 实时世界位姿。"""
+    errors = []
+    pose = {}
+    try:
+        pose_response = _http_json('/base_world_pose')
+        pose = pose_response.get('pose', {}) if isinstance(pose_response, dict) else {}
+        age = pose.get('received_age_s')
+        fresh = (isinstance(age, (int, float)) and not isinstance(age, bool)
+                 and 0.0 <= age <= 0.5)
+        if (not pose.get('valid') or pose.get('frame_id') != 'camera_init'
+                or pose.get('child_frame_id') != 'body' or not fresh):
+            errors.append('VLAHost camera_init -> body 世界位姿无效或超过 0.5 s')
+    except Exception as error:
+        errors.append(f'VLAHost 世界位姿检查失败：{error}')
+    for kind, required in (('action', NATIVE_NAV_ACTIONS),
+                           ('topic', NATIVE_NAV_TOPICS)):
+        try:
+            missing = sorted(required - set(_ros_names(kind)))
+            if missing:
+                errors.append(f'原生导航 ROS {kind} 缺失：{", ".join(missing)}')
+        except Exception as error:
+            errors.append(f'原生导航 ROS {kind} 检查失败：{error}')
+    return {
+        'ok': not errors,
+        'ready_for_motion': not errors and not busy,
+        'errors': errors,
+        'warnings': [],
+        'api': {'busy': busy},
+        'vlahost': {'url': VLAHOST_URL, 'pose': {
+            'valid': bool(pose.get('valid')),
+            'received_age_s': pose.get('received_age_s'),
+            'frame_id': pose.get('frame_id'),
+            'child_frame_id': pose.get('child_frame_id'),
+        }},
+    }
+
+
 def create_app(api_key=None):
     """创建单进程服务；所有会移动机器人的请求共用一把锁。"""
     key = api_key if api_key is not None else os.environ.get('ROBOT_API_KEY', '')
@@ -141,7 +187,9 @@ def create_app(api_key=None):
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-        health = await asyncio.to_thread(inspect_robot_health, False)
+        native_only = all(task['tool'] in ('move', 'move_xy') for task in tasks)
+        health = await asyncio.to_thread(
+            inspect_native_nav_health if native_only else inspect_robot_health, False)
         if not health['ready_for_motion']:
             return JSONResponse(status_code=503, content={
                 'ok': False,
@@ -225,6 +273,18 @@ def create_app(api_key=None):
         task = {**(body if body is not None else {'fixed': True}), 'tool': 'move'}
         return await execute([task], '已到达目标位置', request)
 
+    @app.post('/move_xy', dependencies=[Depends(authorize)])
+    async def move_xy(request: FastAPIRequest, body: dict | None = None):
+        payload = body or {}
+        task = {**payload, 'tool': 'move_xy'}
+        return await execute([task], '已完成底盘 x/y 相对移动', request)
+
+    @app.post('/torso_home_down', dependencies=[Depends(authorize)])
+    async def torso_home_down(request: FastAPIRequest, body: dict | None = None):
+        payload = body or {}
+        task = {**payload, 'tool': 'torso_home_down'}
+        return await execute([task], '已回 home 并完成躯干下降', request)
+
     @app.post('/grasp', dependencies=[Depends(authorize)])
     async def grasp(request: FastAPIRequest, body: dict | None = None):
         # 远程单次抓取默认只抓住并抬起，避免意外进入完整抓放流程。
@@ -237,6 +297,13 @@ def create_app(api_key=None):
         message = ('抓取并抬起已完成'
                    if task['grasp_and_lift'] else '完整抓放流程已完成')
         return await execute([task], message, request)
+
+    @app.post('/head_object_grasp', dependencies=[Depends(authorize)])
+    async def head_object_grasp(request: FastAPIRequest, body: dict | None = None):
+        """通过头部视觉 PoseStamped 抓取物体；grasp_offset_mm 单位为毫米。"""
+        payload = body or {}
+        task = {**payload, 'tool': 'head_object_grasp'}
+        return await execute([task], '头部视觉物体抓取已完成', request)
 
     @app.post('/tasks', dependencies=[Depends(authorize)])
     async def run_tasks(request: FastAPIRequest, tasks: list = Body(...)):
