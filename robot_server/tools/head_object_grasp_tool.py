@@ -7,14 +7,17 @@ from tools.common import option_arguments, run_command, script_command
 
 
 HEAD_OBJECT_GRASP_OPTIONS = {
-    'position-only', 'reach-only', 'control-backend', 'vlahost-url', 'http-timeout-s', 'http-action-hz',
-    'http-log-hz', 'namespace', 'model-xml', 'ik-topic', 'ik-source',
+    'position-only', 'reach-only', 'approach-only', 'control-backend', 'vlahost-url', 'http-timeout-s', 'http-action-hz',
+    'http-log-hz', 'namespace', 'model-xml', 'ik-topic', 'ik-source', 'max-joint-speed-rad-s',
+    'intermediate-offset-mm',
     'joint-source', 'capture-timeout', 'pose-request-interval', 'preflight-timeout', 'motion-timeout',
     'feedback-timeout', 'max-pose-age', 'stable-samples',
-    'stable-position-mm', 'stable-angle-deg', 'approach-height-mm',
+    'stable-position-mm', 'stable-angle-deg', 'approach-front-mm',
+    'approach-height-mm',
     'lift-height-mm', 'max-displacement-mm', 'max-target-angle-deg',
     'position-tolerance-mm', 'angle-tolerance-deg',
     'approach-position-tolerance-mm', 'approach-angle-tolerance-deg', 'settle-time',
+    'reach-position-tolerance-mm', 'reach-angle-tolerance-deg',
     'gripper-duration', 'gripper-rate-hz',
 }
 
@@ -54,9 +57,17 @@ class HeadObjectGraspTool:
         ]
         if request_topic is not None:
             command.append(f'--pose-request-topic={request_topic}')
+        options = dict(task.get('options', {}))
+        intermediate = options.pop('intermediate-offset-mm', None)
+        if intermediate is not None:
+            if (not isinstance(intermediate, (list, tuple)) or len(intermediate) != 3 or
+                    any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+                        not math.isfinite(value) for value in intermediate)):
+                raise ValueError('intermediate-offset-mm 必须是 3 个有限数值')
+            command += ['--intermediate-offset-mm', *[str(value) for value in intermediate]]
         return command + option_arguments(
-            task.get('options', {}), HEAD_OBJECT_GRASP_OPTIONS,
-            flags={'position-only', 'reach-only'})
+            options, HEAD_OBJECT_GRASP_OPTIONS,
+            flags={'position-only', 'reach-only', 'approach-only'})
 
     def run(self, task):
         """显式调用此方法才执行实际抓取。"""

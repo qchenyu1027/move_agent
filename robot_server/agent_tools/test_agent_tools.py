@@ -460,7 +460,10 @@ class AgentToolsTest(unittest.TestCase):
         process.wait.return_value = 0
         with patch('tools.common.subprocess.Popen', return_value=process) as popen:
             self.assertEqual(run_command(['python3', 'script.py']), 0)
-        popen.assert_called_once_with(['python3', 'script.py'], cwd=SCRIPTS_DIR)
+        call = popen.call_args
+        self.assertEqual(call.args, (['python3', 'script.py'],))
+        self.assertEqual(call.kwargs['cwd'], SCRIPTS_DIR)
+        self.assertEqual(call.kwargs['env']['PYTHONNOUSERSITE'], '1')
 
     def test_interrupt_signals_child_and_waits_for_cleanup(self):
         process = Mock()

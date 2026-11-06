@@ -2,6 +2,7 @@
 """工具共用的参数校验和进程执行。"""
 
 import math
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -41,9 +42,11 @@ def script_command(name):
     return [sys.executable, '-u', str(SCRIPTS_DIR / name)]
 
 
-def run_command(command, cancel_event=None):
+def run_command(command, cancel_event=None, env=None):
     """等待控制脚本结束；中断时先让原脚本执行停止和清理逻辑。"""
-    process = subprocess.Popen(command, cwd=SCRIPTS_DIR)
+    # ROS Pinocchio 等二进制包依赖系统 NumPy 1.x，避免用户目录的 NumPy 2.x 抢先导入。
+    child_env = dict(os.environ if env is None else env, PYTHONNOUSERSITE='1')
+    process = subprocess.Popen(command, cwd=SCRIPTS_DIR, env=child_env)
     cancel_sent = False
     try:
         while True:

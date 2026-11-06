@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # 用途：接收头部视觉发布的物体 PoseStamped，转换到 base_link，选左臂或右臂抓取并抬升。
-# 预览：source /home/liuqian/copy/Apex_Deploy/apex_ros_env.sh && /usr/bin/python3 head_object_grasp.py --side left --object-pose-topic /object_pose --pose-request-topic /f2g_pose/request
-# 实机：source /home/liuqian/copy/Apex_Deploy/apex_ros_env.sh && /usr/bin/python3 head_object_grasp.py --side left --object-pose-topic /object_pose --pose-request-topic /f2g_pose/request --execute
+# 预览：source /home/liuqian/copy/Apex_Deploy/apex_ros_env.sh && PYTHONNOUSERSITE=1 /usr/bin/python3 head_object_grasp.py --side left --object-pose-topic /object_pose --pose-request-topic /f2g_pose/request
+# 实机：source /home/liuqian/copy/Apex_Deploy/apex_ros_env.sh && PYTHONNOUSERSITE=1 /usr/bin/python3 head_object_grasp.py --side left --object-pose-topic /object_pose --pose-request-topic /f2g_pose/request --execute --control-backend joint
 # 只到位置并缓慢闭合：source /home/liuqian/copy/Apex_Deploy/apex_ros_env.sh && /usr/bin/python3 head_object_grasp.py --side left --object-pose-topic /object_pose --pose-request-topic /f2g_pose/request --execute --position-only --gripper-duration 12
 # 远程 VLAHost HTTP：在上述实机命令末尾增加 --control-backend http --vlahost-url http://6.6.7.100:8011 --http-log-hz 10
 """头部相机物体位置和姿态抓取。
@@ -20,13 +20,15 @@ import math
 import os
 import sys
 import time
+import numpy as np
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
-from marvin_msgs.msg import IKRequest
+from marvin_msgs.msg import IKRequest, JointcmdArm, JointcmdBody, JointcmdHead, Jointfeedback
+from marvin_msgs.srv import Int
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -37,6 +39,13 @@ from tf2_ros import Buffer, TransformException, TransformListener
 from left_tool_accuracy_test import (angular_error_deg, multiply_quaternions,
                                      read_tool_mount, rotate_vector, topic_name,
                                      transform_pose)
+
+try:
+    import pinocchio as pin
+except ImportError:
+    pin = None
+
+USER_JOINT_SOURCE = 2
 
 
 def normalize(quaternion):
@@ -119,8 +128,12 @@ def parse_args(argv=None):
                         help='只移动到物体位置；忽略水瓶姿态并保持当前工具姿态')
     parser.add_argument('--reach-only', action='store_true',
                         help='到达抓取点后退出；不执行脚本内的闭合夹爪和抬升')
-    parser.add_argument('--control-backend', choices=('ros', 'http'), default='ros',
-                        help='运动指令后端：ros 直接发布 IK，http 发送到远程 VLAHost')
+    parser.add_argument('--approach-only', action='store_true',
+                        help='到达预抓取点后退出；不进入抓取点移动、闭爪或抬升阶段')
+    parser.add_argument('--control-backend', choices=('joint', 'ros', 'http'), default='joint',
+                        help='joint 本地单臂 IK 后发布 user joint source 2；ros 发布 IK；http 使用 VLAHost')
+    parser.add_argument('--max-joint-speed-rad-s', type=float, default=0.3,
+                        help='joint 模式所选臂每关节的最大命令速度，默认 0.3 rad/s')
     parser.add_argument('--vlahost-url', default='http://6.6.7.100:8011',
                         help='远程 VLAHost HTTP 地址，control-backend=http 时使用')
     parser.add_argument('--http-timeout-s', type=float, default=2.0,
@@ -141,7 +154,7 @@ def parse_args(argv=None):
     # 物体位姿已经收到但末端 Arm_L7_Link 尚未进入 TF 缓存时误报失败。
     parser.add_argument('--preflight-timeout', type=float, default=15.0)
     parser.add_argument('--motion-timeout', type=float, default=60.0,
-                        help='每段运动的超时，单位 s')
+                        help='运动超时，单位 s；reach-only 模式从 approach 开始计整个动作')
     parser.add_argument('--feedback-timeout', type=float, default=0.5)
     parser.add_argument('--max-pose-age', type=float, default=0.5,
                         help='物体观测最大年龄，单位 s')
@@ -150,10 +163,15 @@ def parse_args(argv=None):
     parser.add_argument('--stable-angle-deg', type=float, default=5.0)
     parser.add_argument('--grasp-offset-mm', nargs=3, type=float, default=(0., 0., 0.),
                         metavar=('X', 'Y', 'Z'), help='base_link 下物体原点到抓取点的偏移')
+    parser.add_argument('--intermediate-offset-mm', nargs=3, type=float,
+                        metavar=('X', 'Y', 'Z'),
+                        help='可选：先到的中间点，相对物体原点的 base_link 偏移；到位后再到抓取点')
     parser.add_argument(
         '--bottle-to-tool-quaternion', nargs=4, type=float,
         default=(-0.5, -0.5, -0.5, 0.5), metavar=('X', 'Y', 'Z', 'W'),
         help=('瓶子坐标系到 left_tool 的固定旋转，ROS xyzw；默认将瓶子前后/左右/竖直轴映射到工具 X/Y/Z'))
+    parser.add_argument('--approach-front-mm', type=float, default=0.0,
+                        help='预抓取点在抓取点的 base_link -X 方向距离，单位 mm')
     parser.add_argument('--approach-height-mm', type=float, default=30.0)
     parser.add_argument('--lift-height-mm', type=float, default=50.0)
     parser.add_argument('--max-displacement-mm', type=float, default=500.0,
@@ -166,6 +184,10 @@ def parse_args(argv=None):
                         help='接近阶段稳定到位的位置误差阈值，单位 mm')
     parser.add_argument('--approach-angle-tolerance-deg', type=float, default=5.0,
                         help='接近阶段稳定到位的姿态误差阈值，单位 deg')
+    parser.add_argument('--reach-position-tolerance-mm', type=float, default=50.0,
+                        help='reach-only 抓取点稳定到位的位置误差阈值，单位 mm')
+    parser.add_argument('--reach-angle-tolerance-deg', type=float, default=5.0,
+                        help='reach-only 抓取点稳定到位的姿态误差阈值，单位 deg')
     parser.add_argument('--settle-time', type=float, default=1.0)
     parser.add_argument('--gripper-duration', type=float, default=12.0,
                         help='夹爪从完全打开平滑闭合到目标值的时间，单位 s，默认 12 s')
@@ -177,7 +199,8 @@ def parse_args(argv=None):
                 'stable_angle_deg', 'max_displacement_mm', 'max_target_angle_deg',
                 'position_tolerance_mm', 'angle_tolerance_deg', 'settle_time',
                 'approach_position_tolerance_mm', 'approach_angle_tolerance_deg',
-                'gripper_duration', 'gripper_rate_hz')
+                'reach_position_tolerance_mm', 'reach_angle_tolerance_deg',
+                'gripper_duration', 'gripper_rate_hz', 'max_joint_speed_rad_s')
     for name in positive:
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(f'--{name.replace("_", "-")} 必须为有限正数')
@@ -187,13 +210,16 @@ def parse_args(argv=None):
             not 1.0 <= args.http_action_hz <= 20.0 or
             not math.isfinite(args.http_log_hz) or args.http_log_hz <= 0):
         parser.error('--http-timeout-s 必须为正数；--http-action-hz 范围为 1..20；--http-log-hz 必须为正数')
-    for name in ('approach_height_mm', 'lift_height_mm'):
+    for name in ('approach_front_mm', 'approach_height_mm', 'lift_height_mm'):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0:
             parser.error(f'--{name.replace("_", "-")} 必须为有限非负数')
     # argparse 对显式传入的 nargs 参数返回 list；统一成 tuple，避免和默认 tuple 混用。
     args.grasp_offset_mm = tuple(args.grasp_offset_mm)
+    if args.intermediate_offset_mm is not None:
+        args.intermediate_offset_mm = tuple(args.intermediate_offset_mm)
     args.bottle_to_tool_quaternion = tuple(args.bottle_to_tool_quaternion)
-    if not all(math.isfinite(v) for v in args.grasp_offset_mm + args.bottle_to_tool_quaternion):
+    offsets = args.grasp_offset_mm + (args.intermediate_offset_mm or ())
+    if not all(math.isfinite(v) for v in offsets + args.bottle_to_tool_quaternion):
         parser.error('抓取偏移必须是有限数值')
     try:
         normalize(args.bottle_to_tool_quaternion)
@@ -207,6 +233,24 @@ class HeadObjectGrasp(Node):
         super().__init__('head_object_grasp')
         self.args = args
         self.http_mode = args.control_backend == 'http'
+        self.joint_mode = args.control_backend == 'joint'
+        self.ik_model = None
+        self.ik_data = None
+        self.ik_frame_id = None
+        if self.joint_mode:
+            if pin is None:
+                raise ValueError('joint 模式需要 Python pinocchio；请先加载 ROS 环境')
+            model_xml = args.model_xml or os.path.join(
+                get_package_share_directory('marvin_description'),
+                'mjcf', 'Gento_Luna', 'Gento_Luna.xml')
+            self.ik_model = pin.buildModelFromMJCF(model_xml)
+            if self.ik_model.nq != 22 or self.ik_model.nv != 22:
+                raise ValueError(f'MJCF 关节数需为 22，实际 nq={self.ik_model.nq}, nv={self.ik_model.nv}')
+            self.ik_data = self.ik_model.createData()
+            self.ik_frame_id = self.ik_model.getFrameId(
+                'left_tool' if args.side == 'left' else 'right_tool')
+            if self.ik_frame_id >= len(self.ik_model.frames):
+                raise ValueError('MJCF 缺少所选手臂工具 frame')
         self.http_last_state_at = 0.0
         self.http_state = None
         self.http_session_enabled = False
@@ -238,6 +282,7 @@ class HeadObjectGrasp(Node):
         self.exit_code = None
         self.started = time.monotonic()
         self.phase_started = self.started
+        self.motion_started = None
         self.last_log = 0.0
         self.last_preflight_log = 0.0
         self.last_gripper_publish = 0.0
@@ -251,11 +296,19 @@ class HeadObjectGrasp(Node):
         self.target = None
         self.target_quaternion = None
         self.grasp_position = None
+        self.intermediate_position = None
         self.approach_position = None
         self.lift_position = None
         self.initial_position = None
         self.settled_since = None
         self.disarm_started = None
+        self.joint_positions = None
+        self.joint_feedback_at = None
+        self.user_joint_hold = None
+        self.user_joint_target = None
+        self.joint_switch_future = None
+        self.joint_switch_started = None
+        self.intermediate_reached = False
         self.request_topic = topic_name(args.namespace, args.ik_topic)
         self.gripper_topic = topic_name(args.namespace, f'control/gripperValue{"L" if self.index == 0 else "R"}')
         self.create_subscription(PoseStamped, args.object_pose_topic,
@@ -272,20 +325,34 @@ class HeadObjectGrasp(Node):
                                  lambda msg: setattr(self, 'joint_source', msg.data), state_qos)
         self.create_subscription(Int16MultiArray, topic_name(args.namespace, 'info/robot_state'),
                                  self.on_state, 10)
+        if self.joint_mode:
+            self.create_subscription(Jointfeedback, topic_name(args.namespace, 'info/joint_feedback'),
+                                     self.on_joint_feedback, qos_profile_sensor_data)
         suffix = 'L' if self.index == 0 else 'R'
         self.create_subscription(Float32MultiArray, topic_name(args.namespace, f'info/gripper_feedback_{suffix}'),
                                  self.on_gripper, 20)
         self.create_subscription(Int32MultiArray, topic_name(args.namespace, f'info/gripper_feedback_{suffix}_err'),
                                  self.on_gripper_status, 20)
         request_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.publisher = (None if self.http_mode else
+        self.publisher = (None if self.http_mode or self.joint_mode else
                           self.create_publisher(IKRequest, self.request_topic, request_qos))
+        self.user_joint_publishers = ()
+        self.joint_select_client = None
+        if self.joint_mode:
+            self.user_joint_publishers = (
+                self.create_publisher(JointcmdArm, topic_name(args.namespace, 'control/user/joint_cmd_A'), request_qos),
+                self.create_publisher(JointcmdArm, topic_name(args.namespace, 'control/user/joint_cmd_B'), request_qos),
+                self.create_publisher(JointcmdBody, topic_name(args.namespace, 'control/user/joint_cmd_body'), request_qos),
+                self.create_publisher(JointcmdHead, topic_name(args.namespace, 'control/user/joint_cmd_head'), request_qos),
+            )
+            self.joint_select_client = self.create_client(
+                Int, topic_name(args.namespace, 'control/joint_cmd_mux/select'))
         self.gripper_publisher = (None if self.http_mode else
                                   self.create_publisher(Float32, self.gripper_topic, 10))
         self.create_timer(0.05, self.tick)
         self.get_logger().info(f'等待 {args.object_pose_topic} 物体位姿；选用{self.label}臂 {self.tool}；'
                                f'{"执行" if args.execute else "预览"}模式；'
-                               f'控制后端={"VLAHost HTTP " + args.vlahost_url if self.http_mode else "ROS IK"}')
+                               f'控制后端={"VLAHost HTTP " + args.vlahost_url if self.http_mode else "user joint source 2" if self.joint_mode else "ROS IK"}')
 
     def on_pose(self, msg):
         if self.phase == 'capture':
@@ -294,6 +361,13 @@ class HeadObjectGrasp(Node):
     def on_state(self, msg):
         self.states = tuple(msg.data)
         self.state_at = time.monotonic()
+
+    def on_joint_feedback(self, msg):
+        positions = [*msg.body_positions[:6], *msg.head_positions[:2],
+                     *msg.arm_positions[:14]]
+        if len(positions) == 22 and all(math.isfinite(value) for value in positions):
+            self.joint_positions = [float(value) for value in positions]
+            self.joint_feedback_at = time.monotonic()
 
     def on_gripper(self, msg):
         if len(msg.data) >= 3 and all(math.isfinite(v) for v in msg.data[:3]):
@@ -320,9 +394,10 @@ class HeadObjectGrasp(Node):
             frame = msg.header.frame_id.strip('/')
             if not frame:
                 raise ValueError('物体位姿 frame_id 为空')
+            # 相机 TF 由关节反馈时间戳发布，通常会比图像时间落后几十毫秒。
+            # 使用最新可用 TF，避免按图像时间查询时触发 future extrapolation。
             transform = self.buffer.lookup_transform(
-                'base_link', frame, Time.from_msg(msg.header.stamp),
-                timeout=Duration(seconds=0.02))
+                'base_link', frame, Time(), timeout=Duration(seconds=0.02))
             position, quaternion = pose_in_base(msg, transform)
             position_changed = (math.dist(position, self.samples[-1][0]) * 1000.0 >
                                 self.args.stable_position_mm) if self.samples else False
@@ -460,6 +535,146 @@ class HeadObjectGrasp(Node):
             except ValueError as error:
                 self.get_logger().warning(f'关闭 VLAHost 控制会话失败：{error}')
 
+    def feedback_configuration(self):
+        if (self.joint_feedback_at is None or
+                time.monotonic() - self.joint_feedback_at > self.args.feedback_timeout or
+                self.joint_positions is None):
+            raise ValueError('22 关节反馈缺失或过期')
+        return list(self.joint_positions)
+
+    def publish_user_joint(self, q):
+        if len(q) != 22 or not all(math.isfinite(value) for value in q):
+            raise ValueError('user joint 命令必须包含 22 个有限关节角')
+        stamp = self.get_clock().now().to_msg()
+        left = JointcmdArm(); left.header.stamp = stamp; left.positions = q[8:15]
+        right = JointcmdArm(); right.header.stamp = stamp; right.positions = q[15:22]
+        body = JointcmdBody(); body.header.stamp = stamp; body.positions = q[:6]
+        head = JointcmdHead(); head.header.stamp = stamp; head.positions = [q[6], q[7], 0.0]
+        for publisher, message in zip(self.user_joint_publishers, (left, right, body, head)):
+            publisher.publish(message)
+
+    def solve_arm_ik(self, q, position, quaternion):
+        start = 8 if self.index == 0 else 15
+        indices = list(range(start, start + 7))
+        position_only = self.args.position_only
+        target = pin.SE3(
+            pin.Quaternion(float(quaternion[3]), float(quaternion[0]),
+                           float(quaternion[1]), float(quaternion[2])).toRotationMatrix(),
+            np.asarray(position, dtype=float))
+        if position_only:
+            if self.phase in ('approach', 'approach_second'):
+                angle_limit_deg = self.args.approach_angle_tolerance_deg
+                position_limit_mm = self.args.approach_position_tolerance_mm
+            elif self.phase == 'descend' and self.args.reach_only:
+                angle_limit_deg = self.args.reach_angle_tolerance_deg
+                position_limit_mm = self.args.reach_position_tolerance_mm
+            else:
+                angle_limit_deg = self.args.angle_tolerance_deg
+                position_limit_mm = self.args.position_tolerance_mm
+            position_limit_mm = min(10.0, position_limit_mm)
+        # 优先完整保持姿态；只有在位置模式且 6D 求解失败时才尝试位置 IK。
+        # 位置 IK 的结果仍需满足姿态漂移上限，避免工具在接近物体时大幅翻转。
+        for use_position_ik in ((False, True) if position_only else (False,)):
+            solution = np.asarray(q, dtype=float)
+            for _ in range(80):
+                pin.forwardKinematics(self.ik_model, self.ik_data, solution)
+                pin.updateFramePlacements(self.ik_model, self.ik_data)
+                current = self.ik_data.oMf[self.ik_frame_id]
+                if use_position_ik:
+                    error = target.translation - current.translation
+                    reference = pin.LOCAL_WORLD_ALIGNED
+                    rows = 3
+                else:
+                    error = pin.log6(current.inverse() * target).vector
+                    reference = pin.LOCAL
+                    rows = 6
+                if float(np.linalg.norm(error)) < 1e-4:
+                    break
+                jacobian = pin.computeFrameJacobian(
+                    self.ik_model, self.ik_data, solution, self.ik_frame_id, reference)[:rows, indices]
+                velocity = jacobian.T @ np.linalg.solve(
+                    jacobian @ jacobian.T + 1e-4 * np.eye(rows), error)
+                norm = float(np.linalg.norm(velocity))
+                if norm > 0.12:
+                    velocity *= 0.12 / norm
+                delta = np.zeros(self.ik_model.nv)
+                delta[indices] = velocity
+                solution = pin.integrate(self.ik_model, solution, delta * 0.7)
+                for index in indices:
+                    solution[index] = min(max(solution[index], self.ik_model.lowerPositionLimit[index]),
+                                          self.ik_model.upperPositionLimit[index])
+            pin.forwardKinematics(self.ik_model, self.ik_data, solution)
+            pin.updateFramePlacements(self.ik_model, self.ik_data)
+            final = self.ik_data.oMf[self.ik_frame_id]
+            position_error_mm = float(np.linalg.norm(target.translation - final.translation) * 1000.0)
+            angle_error_deg = math.degrees(float(np.linalg.norm(
+                pin.log3(final.rotation.T @ target.rotation))))
+            if position_only:
+                converged = (position_error_mm <= position_limit_mm and
+                             angle_error_deg <= angle_limit_deg)
+            else:
+                converged = float(np.linalg.norm(pin.log6(final.inverse() * target).vector)) <= 3e-3
+            if converged:
+                result = list(q)
+                result[start:start + 7] = solution[start:start + 7].tolist()
+                return result
+        if position_only:
+            raise ValueError(
+                f'单臂位置 IK 未收敛：位置误差={position_error_mm:.1f} mm'
+                f'（上限 {position_limit_mm:g} mm），'
+                f'相对保持姿态转角={angle_error_deg:.1f}°（上限 {angle_limit_deg:g}°）；'
+                f'目标={self.target}')
+        else:
+            raise ValueError(
+                f'单臂 IK 未收敛：位置误差={position_error_mm:.1f} mm，'
+                f'姿态误差={angle_error_deg:.1f}°；目标={self.target}')
+
+    def make_user_joint_target(self, actual, actual_quaternion):
+        current = self.feedback_configuration()
+        q = list(self.user_joint_hold)
+        start = 8 if self.index == 0 else 15
+        q[start:start + 7] = current[start:start + 7]
+        # 仅将 TF 实测的相对位姿增量施加到当前模型 FK，避免模型绝对偏差造成接管跳动。
+        pin.forwardKinematics(self.ik_model, self.ik_data, np.asarray(q))
+        pin.updateFramePlacements(self.ik_model, self.ik_data)
+        model_pose = self.ik_data.oMf[self.ik_frame_id]
+        model_position = model_pose.translation
+        model_quaternion = tuple(float(v) for v in pin.Quaternion(model_pose.rotation).coeffs())
+        inverse_actual = (-actual_quaternion[0], -actual_quaternion[1],
+                          -actual_quaternion[2], actual_quaternion[3])
+        delta_quaternion = multiply_quaternions(self.target_quaternion, inverse_actual)
+        target_position = tuple(float(model + target - observed) for model, target, observed in
+                                zip(model_position, self.target, actual))
+        target_quaternion = normalize(multiply_quaternions(delta_quaternion, model_quaternion))
+        return self.solve_arm_ik(q, target_position, target_quaternion)
+
+    def activate_user_joint(self, now):
+        if self.user_joint_hold is None:
+            self.disarm_started = now
+        # 切源等待期间继续用最新反馈覆盖旧 user 缓存，避免其它源正在运动时接管旧角度。
+        self.user_joint_hold = self.feedback_configuration()
+        self.user_joint_target = list(self.user_joint_hold)
+        self.publish_user_joint(self.user_joint_hold)
+        if now - self.disarm_started < 0.5:
+            return False
+        if self.joint_source == USER_JOINT_SOURCE:
+            return True
+        if self.joint_switch_future is None:
+            request = Int.Request(); request.data = USER_JOINT_SOURCE
+            self.joint_switch_future = self.joint_select_client.call_async(request)
+            self.joint_switch_started = now
+            return False
+        if not self.joint_switch_future.done():
+            if now - self.joint_switch_started > 2.0:
+                raise ValueError('joint mux 切换 source 2 超时')
+            return False
+        response = self.joint_switch_future.result()
+        if response is None or not response.success:
+            raise ValueError(f'joint mux 切换失败：{None if response is None else response.message}')
+        if now - self.joint_switch_started > 2.0:
+            raise ValueError('joint mux 未确认 source 2')
+        return False
+
     def readiness_problem(self, now):
         if getattr(self, 'http_mode', False):
             try:
@@ -469,20 +684,34 @@ class HeadObjectGrasp(Node):
             except ValueError as error:
                 return str(error)
             return None
-        if self.ik_source != self.args.ik_source or self.joint_source != self.args.joint_source:
+        if self.joint_mode:
+            if self.joint_source is None:
+                return '尚未收到 joint mux 当前源'
+            if self.phase != 'preflight' and self.joint_source != USER_JOINT_SOURCE:
+                return f'joint mux 已切离 source 2，当前 {self.joint_source}'
+            if (self.joint_feedback_at is None or
+                    now - self.joint_feedback_at > self.args.feedback_timeout or
+                    self.joint_positions is None):
+                return '22 关节反馈缺失或过期'
+            if not self.joint_select_client.service_is_ready():
+                return 'joint mux 切源服务不可用'
+            for publisher in self.user_joint_publishers:
+                if publisher.get_subscription_count() == 0:
+                    return f'{publisher.topic_name} 无订阅者'
+        elif self.ik_source != self.args.ik_source or self.joint_source != self.args.joint_source:
             return f'控制 mux 源需 IK={self.args.ik_source}, joint={self.args.joint_source}；当前 {self.ik_source}, {self.joint_source}'
         if (self.states is None or self.state_at is None or
                 now - self.state_at > self.args.feedback_timeout or len(self.states) < 4 or
                 self.states[self.index] not in (1, 2) or self.states[1-self.index] not in (1, 2) or
                 self.states[3] not in (1, 2)):
             return f'机器人手臂/躯干状态无效或过期：{self.states}'
-        if self.publisher.get_subscription_count() == 0:
+        if not self.joint_mode and self.publisher.get_subscription_count() == 0:
             return f'{self.request_topic} 无订阅者'
         # VLAHost 会在同一 IK 话题上保留自己的 publisher。按用户要求忽略它，
         # 不让这个预检警告阻止本地控制流程；mux 源检查仍然照常生效。
         peers = [p for p in self.get_publishers_info_by_topic(self.request_topic)
                  if not (p.node_name == self.get_name() and p.node_namespace == self.get_namespace())
-                 and p.node_name != 'luna_vlahost']
+                 and p.node_name != 'luna_vlahost'] if not self.joint_mode else []
         if peers:
             return f'{self.request_topic} 有其他发布者：{[p.node_name for p in peers]}'
         if self.gripper_publisher.get_subscription_count() == 0:
@@ -499,8 +728,14 @@ class HeadObjectGrasp(Node):
         object_position, object_quaternion = self.object_pose
         offset = tuple(v / 1000.0 for v in self.args.grasp_offset_mm)
         grasp = tuple(a + b for a, b in zip(object_position, offset))
-        approach = (grasp[0], grasp[1], grasp[2] + self.args.approach_height_mm / 1000.0)
+        intermediate = None
+        if getattr(self.args, 'intermediate_offset_mm', None) is not None:
+            intermediate_offset = tuple(v / 1000.0 for v in self.args.intermediate_offset_mm)
+            intermediate = tuple(a + b for a, b in zip(object_position, intermediate_offset))
+        approach = (grasp[0] - self.args.approach_front_mm / 1000.0,
+                    grasp[1], grasp[2] + self.args.approach_height_mm / 1000.0)
         lift = (grasp[0], grasp[1], grasp[2] + self.args.lift_height_mm / 1000.0)
+        single_point = self.args.approach_only and approach == grasp
         if self.args.position_only:
             # IKRequest 仍需要姿态字段；保持执行开始时的当前工具姿态，
             # 避免把水瓶姿态转换成夹爪姿态后产生意外翻转。
@@ -514,24 +749,46 @@ class HeadObjectGrasp(Node):
             raise ValueError(
                 f'补偿后的目标旋转 {angle:.1f}° 超出 '
                 f'{self.args.max_target_angle_deg:g}° 上限')
-        for name, position in (('抓取', grasp), ('预抓取', approach), ('抬升', lift)):
+        checked_targets = (('抓取', grasp),) if single_point else (
+            ('抓取', grasp), ('预抓取', approach), ('抬升', lift))
+        if intermediate is not None:
+            checked_targets = checked_targets + (('中间点', intermediate),)
+        for name, position in checked_targets:
             if math.dist(actual, position) * 1000.0 > self.args.max_displacement_mm:
                 raise ValueError(f'{name}目标超过 {self.args.max_displacement_mm:g} mm 位移上限')
-        self.grasp_position, self.approach_position, self.lift_position = grasp, approach, lift
+        self.grasp_position = grasp
+        self.intermediate_position = intermediate
+        self.approach_position, self.lift_position = approach, lift
         self.target_quaternion = goal_quaternion
         self.initial_position = actual
         mode = '只位置，保持当前工具姿态' if self.args.position_only else '位置+水瓶姿态'
-        self.get_logger().info(f'{self.tool} 当前={actual}，抓取={grasp}，预抓取={approach}，'
-                               f'抬升={lift}，模式={mode}，工具姿态 xyzw={goal_quaternion}，'
-                               f'相对当前转角={angle:.1f}°')
+        targets = f'唯一抓取点={grasp}' if single_point else (
+            f'抓取={grasp}，预抓取={approach}，抬升={lift}')
+        if intermediate is not None:
+            targets = f'中间点={intermediate}，第二点={approach}'
+        self.get_logger().info(f'{self.tool} 当前={actual}，{targets}，模式={mode}，'
+                               f'工具姿态 xyzw={goal_quaternion}，相对当前转角={angle:.1f}°')
 
-    def publish_request(self, available, gripper_value=0.0):
+    def publish_request(self, available, gripper_value=0.0, actual=None, quaternion=None):
         if getattr(self, 'http_mode', False):
             if available:
                 try:
                     self.http_publish(gripper_value)
                 except ValueError as error:
                     self.finish(1, f'VLAHost HTTP 控制失败：{error}')
+            return
+        if self.joint_mode:
+            if available:
+                if self.joint_source != USER_JOINT_SOURCE:
+                    raise ValueError('joint mux 已切离 source 2')
+                goal = self.make_user_joint_target(actual, quaternion)
+                start = 8 if self.index == 0 else 15
+                max_step = self.args.max_joint_speed_rad_s * 0.05
+                for index in range(start, start + 7):
+                    change = goal[index] - self.user_joint_target[index]
+                    goal[index] = self.user_joint_target[index] + max(-max_step, min(change, max_step))
+                self.publish_user_joint(goal)
+                self.user_joint_target = goal
             return
         request = IKRequest()
         request.header.stamp = self.get_clock().now().to_msg()
@@ -557,6 +814,8 @@ class HeadObjectGrasp(Node):
     def enter(self, phase, target=None):
         self.phase = phase
         self.phase_started = time.monotonic()
+        if phase == 'approach' and self.motion_started is None:
+            self.motion_started = self.phase_started
         self.settled_since = None
         if target is not None:
             self.target = target
@@ -566,6 +825,18 @@ class HeadObjectGrasp(Node):
         """停止本脚本的控制输出，避免退出后 IK 继续使用最后一个目标。"""
         if getattr(self, 'http_mode', False):
             self.release_http()
+        elif self.joint_mode and self.user_joint_hold is not None:
+            if self.joint_source == USER_JOINT_SOURCE:
+                try:
+                    current = self.feedback_configuration()
+                    hold = list(self.user_joint_hold)
+                    start = 8 if self.index == 0 else 15
+                    hold[start:start + 7] = current[start:start + 7]
+                    self.publish_user_joint(hold)
+                except ValueError as error:
+                    self.get_logger().warning(f'退出时无法更新手臂保持目标：{error}')
+            self.user_joint_hold = None
+            self.user_joint_target = None
         elif getattr(self, 'publisher', None) is not None:
             self.publish_request(False)
 
@@ -581,6 +852,12 @@ class HeadObjectGrasp(Node):
         if self.exit_code is not None:
             return
         now = time.monotonic()
+        # reach-only 的两段运动共用一个截止时间，防止进入 descend 后重新计时。
+        if (self.args.reach_only and self.motion_started is not None and
+                now - self.motion_started >= self.args.motion_timeout):
+            self.finish(2, f'抓取点移动总超时 {self.args.motion_timeout:g} s；'
+                           f'停在 {self.phase} 阶段，停止后续任务')
+            return
         if self.phase == 'capture':
             request_due = (self.last_pose_request_at is None or
                            now - self.last_pose_request_at >= self.args.pose_request_interval)
@@ -610,7 +887,9 @@ class HeadObjectGrasp(Node):
                 except ValueError as error:
                     self.finish(1, str(error))
                     return
-                self.target = self.approach_position
+                self.target = (self.intermediate_position
+                               if self.intermediate_position is not None
+                               else self.approach_position)
             if not self.args.execute:
                 self.finish(0, '预览完成；未发布运动或夹爪命令')
                 return
@@ -622,44 +901,82 @@ class HeadObjectGrasp(Node):
                     self.last_preflight_log = now
                     self.get_logger().warning(f'等待执行预检条件：{problem}')
                 return
-            if self.disarm_started is None:
-                self.disarm_started = now
-            self.publish_request(False)
-            if now - self.disarm_started >= 0.5:
-                self.enter('approach', self.approach_position)
+            if self.joint_mode:
+                try:
+                    if self.activate_user_joint(now):
+                        self.enter('approach', self.target)
+                except (ValueError, RuntimeError) as error:
+                    self.finish(1, f'user joint 接管失败：{error}')
+            else:
+                if self.disarm_started is None:
+                    self.disarm_started = now
+                self.publish_request(False)
+                if now - self.disarm_started >= 0.5:
+                    self.enter('approach', self.target)
             return
         problem = self.readiness_problem(now)
         if problem:
             self.finish(1, f'执行期间预检失败，停止指令：{problem}')
             return
-        if self.phase in ('approach', 'descend', 'lift'):
+        if self.phase in ('approach', 'approach_second', 'descend', 'lift'):
             if now - self.phase_started > self.args.motion_timeout:
-                self.finish(2, f'{self.phase} 超时，停止发送目标')
+                error_mm = math.dist(actual, self.target) * 1000.0
+                angle_deg = angular_error_deg(quaternion, self.target_quaternion)
+                self.finish(2, f'{self.phase} 超时，停止发送目标；'
+                               f'最终误差 {error_mm:.1f} mm / {angle_deg:.1f}°')
                 return
             gripper_value = 0.0 if self.phase != 'lift' else 1.0
-            self.publish_request(True, gripper_value)
+            try:
+                self.publish_request(True, gripper_value, actual, quaternion)
+            except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
+                self.finish(1, f'运动目标生成失败：{error}')
+                return
             self.publish_gripper(gripper_value, now)
             error_mm = math.dist(actual, self.target) * 1000.0
             angle_deg = angular_error_deg(quaternion, self.target_quaternion)
-            position_tolerance_mm = (
-                self.args.approach_position_tolerance_mm
-                if self.phase == 'approach' else self.args.position_tolerance_mm)
-            angle_tolerance_deg = (
-                self.args.approach_angle_tolerance_deg
-                if self.phase == 'approach' else self.args.angle_tolerance_deg)
+            if self.phase in ('approach', 'approach_second'):
+                position_tolerance_mm = self.args.approach_position_tolerance_mm
+                angle_tolerance_deg = self.args.approach_angle_tolerance_deg
+            elif self.phase == 'descend' and self.args.reach_only:
+                position_tolerance_mm = self.args.reach_position_tolerance_mm
+                angle_tolerance_deg = self.args.reach_angle_tolerance_deg
+            else:
+                position_tolerance_mm = self.args.position_tolerance_mm
+                angle_tolerance_deg = self.args.angle_tolerance_deg
             if now - self.last_log >= 1.0:
                 self.last_log = now
-                self.get_logger().info(f'{self.phase} 误差={error_mm:.1f} mm / {angle_deg:.1f}°')
+                delta_mm = tuple((target - current) * 1000.0
+                                 for target, current in zip(self.target, actual))
+                self.get_logger().info(
+                    f'{self.phase} 误差={error_mm:.1f} mm / {angle_deg:.1f}°；'
+                    f'目标-实测 xyz=({delta_mm[0]:+.1f}, {delta_mm[1]:+.1f}, '
+                    f'{delta_mm[2]:+.1f}) mm；'
+                    f'完成阈值={position_tolerance_mm:g} mm / {angle_tolerance_deg:g}°，'
+                    f'稳定 {self.args.settle_time:g} s')
             if (error_mm <= position_tolerance_mm and
                     angle_deg <= angle_tolerance_deg):
                 if self.settled_since is None:
                     self.settled_since = now
                 elif now - self.settled_since >= self.args.settle_time:
-                    if self.phase == 'approach':
-                        self.enter('descend', self.grasp_position)
+                    if self.phase in ('approach', 'approach_second'):
+                        if (getattr(self, 'intermediate_position', None) is not None and
+                                not self.intermediate_reached):
+                            self.intermediate_reached = True
+                            self.enter('approach_second', self.approach_position)
+                        elif self.args.approach_only:
+                            single_point = (getattr(self, 'approach_position', None) is not None and
+                                            self.approach_position == self.grasp_position)
+                            point_name = '抓取点' if single_point else '预抓取点'
+                            suffix = '夹爪保持打开' if single_point else '夹爪保持打开，未移动到抓取点'
+                            self.finish(0, f'PASS: {self.label}手到达{point_name}；'
+                                           f'最终误差 {error_mm:.1f} mm / {angle_deg:.1f}°；{suffix}')
+                        else:
+                            self.enter('descend', self.grasp_position)
                     elif self.phase == 'descend':
                         if self.args.reach_only:
-                            self.finish(0, f'PASS: {self.label}手已到抓取点；夹爪保持打开')
+                            self.finish(0, f'PASS: {self.label}手进入抓取点容差范围；'
+                                           f'最终误差 {error_mm:.1f} mm / {angle_deg:.1f}°；'
+                                           '夹爪保持打开，尚未验证抓住水瓶')
                         else:
                             self.enter('closing')
                     else:
@@ -677,7 +994,11 @@ class HeadObjectGrasp(Node):
             # 避免从 0 直接跳到较大闭合量造成夹爪冲击。
             progress = smoothstep01(
                 (elapsed - 0.5) / self.args.gripper_duration)
-            self.publish_request(True, progress)
+            try:
+                self.publish_request(True, progress, actual, quaternion)
+            except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
+                self.finish(1, f'保持目标生成失败：{error}')
+                return
             self.publish_gripper(progress, now)
             if elapsed >= self.args.gripper_duration + 2.5:
                 if self.args.lift_height_mm:

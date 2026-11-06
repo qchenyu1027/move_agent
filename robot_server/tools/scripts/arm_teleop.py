@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 用途：从 tools/scripts 启动左右臂 ROS 笛卡尔遥操或一次性位移；运行：source /home/liuqian/WBC/Apex_Deploy/apex_ros_env.sh && /usr/bin/python3 tools/scripts/arm_teleop.py --side left --execute --move-z-mm 50。
+# 用途：从 tools/scripts 启动左右臂 ROS 笛卡尔遥操或一次性位移；运行：source /home/liuqian/WBC/Apex_Deploy/apex_ros_env.sh && PYTHONNOUSERSITE=1 /usr/bin/python3 tools/scripts/arm_teleop.py --side left --execute --move-z-mm 50。
 """左右臂 ROS 笛卡尔遥操的 tools/scripts 启动入口。"""
 
 from pathlib import Path

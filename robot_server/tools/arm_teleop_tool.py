@@ -12,6 +12,8 @@ ARM_TELEOP_OPTIONS = {
     'gripper-open-value', 'gripper-topic', 'model-xml', 'control-backend',
     'vlahost-url', 'move-x-mm', 'move-y-mm', 'move-z-mm',
     'once-timeout-s', 'once-tolerance-mm', 'once-settle-s',
+    'once-command-duration-s',
+    'max-joint-speed-rad-s', 'vlahost-control-space',
 }
 
 
@@ -25,7 +27,10 @@ class ArmTeleopTool:
         side = task.get('side')
         if side not in ('left', 'right'):
             raise ValueError('side 必须是 left 或 right')
-        options = task.get('options', {})
+        options = dict(task.get('options', {}))
+        # 任务命令显式固定到最新的 ROS user joint source 2 链路；
+        # 需要旧 replay/VLAHost 行为时，任务仍可显式覆盖此选项。
+        options.setdefault('control-backend', 'joint')
         return (script_command('arm_teleop.py')
                 + [f'--side={side}', '--execute']
                 + option_arguments(
