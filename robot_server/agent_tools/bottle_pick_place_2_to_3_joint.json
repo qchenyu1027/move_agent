@@ -1,0 +1,90 @@
+[
+
+  {
+    "tool": "head_object_grasp",
+    "side": "left",
+    "object_pose_topic": "/object_pose",
+    "pose_request_topic": "/f2g_pose/request",
+    "grasp_offset_mm": [-100, 0, -40],
+    "options": {
+      "capture-timeout": 45,
+      "pose-request-interval": 1,
+      "motion-timeout": 30,
+      "model-xml": "/home/liuqian/copy/Apex_Deploy/robot_node/marvin_description/mjcf/Gento_Luna/Gento_Luna.xml",
+      "control-backend": "joint",
+      "position-only": true,
+      "approach-only": true,
+      "approach-front-mm": 0,
+      "approach-height-mm": 0,
+      "approach-position-tolerance-mm": 10,
+      "approach-angle-tolerance-deg": 5
+    }
+  },
+  {
+    "tool": "gripper",
+    "side": "left",
+    "action": "set",
+    "position": 0.7,
+    "options": {
+      "control-backend": "ros",
+      "speed": 0.4
+    }
+  },
+  {
+    "tool": "control_sources",
+    "ik_source": 0,
+    "joint_source": 0
+  },
+  {
+    "tool": "go_home",
+    "options": {
+      "completion-margin-s": 2.5
+    }
+  },
+  {
+    "tool": "arm_teleop",
+    "side": "left",
+    "options": {
+      "control-backend": "joint",
+      "move-z-mm": 170,
+      "once-timeout-s": 45,
+      "once-command-duration-s": 2.0
+    }
+  },
+  {
+    "tool": "move",
+    "pose_ids": [3]
+  },
+    {
+    "tool": "arm_teleop",
+    "side": "left",
+    "options": {
+      "control-backend": "joint",
+      "move-z-mm": -30,
+      "once-timeout-s": 45,
+      "once-command-duration-s": 2.0
+    }
+  },
+  {
+    "tool": "gripper",
+    "side": "left",
+    "action": "set",
+    "position": 0.0,
+    "options": {
+      "control-backend": "ros",
+      "speed": 0.4
+    }
+  },
+
+  {
+    "tool": "control_sources",
+    "ik_source": 0,
+    "joint_source": 0
+  },
+  {
+    "tool": "go_home",
+    "options": {
+      "completion-margin-s": 2.5
+    }
+  }
+]

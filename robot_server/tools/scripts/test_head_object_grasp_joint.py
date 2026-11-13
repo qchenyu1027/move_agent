@@ -16,7 +16,7 @@ from builtin_interfaces.msg import Time
 from ament_index_python.packages import get_package_share_directory
 
 sys.path.insert(0, str(Path(__file__).parent))
-from head_object_grasp import HeadObjectGrasp
+from head_object_grasp import HeadObjectGrasp, parse_args
 
 
 MODEL = str(Path(get_package_share_directory('marvin_description')) /
@@ -215,6 +215,88 @@ class HeadObjectGraspJointTest(unittest.TestCase):
         self.assertEqual(finish.call_args.args[0], 0)
         self.assertIn('到达抓取点', finish.call_args.args[1])
         enter.assert_not_called()
+
+    def test_object_pose_change_topic_defaults_to_visual_publisher_topic(self):
+        args = parse_args(['--side', 'left', '--object-pose-topic', '/object_pose'])
+        self.assertEqual(args.object_pose_change_topic, '/object_pose_changed')
+        self.assertEqual(parse_args([
+            '--side', 'left', '--object-pose-topic', '/object_pose',
+            '--object-pose-change-topic', '']).object_pose_change_topic, '')
+
+    def test_pose_change_interrupts_motion_and_recollects(self):
+        logger = SimpleNamespace(warning=Mock(), info=Mock())
+        node = SimpleNamespace(
+            phase='approach', pose_change_pending=True,
+            samples=[((0.3, 0.2, 0.76), (0., 0., 0., 1.))],
+            object_pose=((0.3, 0.2, 0.8), (0., 0., 0., 1.)),
+            object_frozen_at=1.0, pending_pose=object(),
+            target=(0.3, 0.2, 0.76), target_quaternion=(0., 0., 0., 1.),
+            grasp_position=(0.3, 0.2, 0.76), intermediate_position=None,
+            approach_position=(0.3, 0.2, 0.76), lift_position=(0.3, 0.2, 0.81),
+            initial_position=(0.1, 0.2, 0.7), settled_since=1.0,
+            intermediate_reached=True, phase_started=1.0, started=1.0,
+            motion_started=1.0, last_pose_request_at=1.0,
+            hold_current=Mock(), get_logger=lambda: logger)
+        node.restart_capture = lambda now: HeadObjectGrasp.restart_capture(node, now)
+        HeadObjectGrasp.handle_pose_change(node, 5.0)
+        node.hold_current.assert_called_once_with()
+        self.assertEqual(node.phase, 'capture')
+        self.assertIsNone(node.object_pose)
+        self.assertIsNone(node.target)
+        self.assertIsNone(node.target_quaternion)
+        self.assertIsNone(node.motion_started)
+        self.assertIsNone(node.last_pose_request_at)
+        self.assertEqual(list(node.samples), [])
+        self.assertEqual(node.started, 5.0)
+        self.assertFalse(node.intermediate_reached)
+        self.assertIn('按新位置重新采集和规划', logger.warning.call_args.args[0])
+
+    def test_pose_change_during_capture_restarts_samples_only(self):
+        logger = SimpleNamespace(warning=Mock(), info=Mock())
+        node = SimpleNamespace(
+            phase='capture', samples=[((0.3, 0.2, 0.8), (0., 0., 0., 1.))],
+            started=1.0, last_pose_request_at=1.5, hold_current=Mock(),
+            get_logger=lambda: logger)
+        HeadObjectGrasp.handle_pose_change(node, 5.0)
+        self.assertEqual(list(node.samples), [])
+        self.assertEqual(node.started, 5.0)
+        self.assertIsNone(node.last_pose_request_at)
+        node.hold_current.assert_not_called()
+
+    def test_keep_hold_waits_for_an_interrupt_before_publishing(self):
+        publish = Mock()
+        node = SimpleNamespace(
+            http_mode=False, joint_mode=True, joint_source=2,
+            interrupt_joint_hold=None, publish_user_joint=publish,
+            get_logger=lambda: SimpleNamespace(warning=Mock()))
+        HeadObjectGrasp.keep_hold(node)
+        publish.assert_not_called()
+        node.interrupt_joint_hold = [0.0] * 22
+        HeadObjectGrasp.keep_hold(node)
+        publish.assert_called_once_with([0.0] * 22)
+
+    def test_pose_change_ignored_while_object_moves_with_gripper(self):
+        logger = SimpleNamespace(warning=Mock(), info=Mock())
+        node = SimpleNamespace(phase='lift', hold_current=Mock(),
+                               get_logger=lambda: logger)
+        HeadObjectGrasp.handle_pose_change(node, 5.0)
+        node.hold_current.assert_not_called()
+        self.assertEqual(node.phase, 'lift')
+        self.assertIn('忽略物体位置变化通知', logger.warning.call_args.args[0])
+
+    def test_hold_current_publishes_joint_feedback(self):
+        current = self.q.tolist()
+        publish = Mock()
+        node = SimpleNamespace(
+            http_mode=False, joint_mode=True, user_joint_hold=[0.0] * 22,
+            user_joint_target=None, feedback_configuration=lambda: current,
+            publish_user_joint=publish, publisher=None,
+            get_logger=lambda: SimpleNamespace(warning=Mock()))
+        HeadObjectGrasp.hold_current(node)
+        publish.assert_called_once_with(current)
+        self.assertEqual(node.user_joint_hold, current)
+        self.assertEqual(node.user_joint_target, current)
+        self.assertEqual(node.interrupt_joint_hold, current)
 
     def test_intermediate_point_transitions_to_second_point(self):
         now = time.monotonic()

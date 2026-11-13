@@ -75,8 +75,8 @@ def parse_args():
     parser.add_argument('--feedback-timeout', type=float, default=0.5)
     parser.add_argument('--once-timeout-s', type=float, default=30.0,
                         help='一次性移动等待完成的超时时间，默认 30 秒')
-    parser.add_argument('--once-tolerance-mm', type=float, default=8.0,
-                        help='一次性移动完成的位置误差，默认 8 mm')
+    parser.add_argument('--once-tolerance-mm', type=float, default=20.0,
+                        help='一次性移动完成的位置误差，默认 20 mm')
     parser.add_argument('--once-settle-s', type=float, default=0.3,
                         help='一次性移动达到误差后保持的确认时间，默认 0.3 秒')
     parser.add_argument('--rate-hz', type=float, default=30.0)

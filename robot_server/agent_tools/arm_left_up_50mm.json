@@ -6,7 +6,7 @@
       "control-backend": "auto",
       "move-z-mm": 50,
       "once-timeout-s": 30,
-      "once-tolerance-mm": 8,
+      "once-tolerance-mm": 20,
       "once-settle-s": 0.3
     }
   }

@@ -7,6 +7,7 @@
     "grasp_offset_mm": [0, 0, -40],
     "options": {
       "capture-timeout": 45,
+      "object-pose-change-topic": "/object_pose_changed",
       "model-xml": "/home/liuqian/copy/Apex_Deploy/robot_node/marvin_description/mjcf/Gento_Luna/Gento_Luna.xml",
       "position-only": true,
       "approach-position-tolerance-mm": 50,

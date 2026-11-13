@@ -160,6 +160,12 @@ IK 阶段报错且不启动动作。IK 采用连续化/热启动小步逼近，�
 如需调整接近判定，可在 `options` 中设置 `approach-position-tolerance-mm` 和
 `approach-angle-tolerance-deg`。
 
+视觉发布器在物体移动超过阈值时会向 `/object_pose_changed` 发布 `std_msgs/Bool`。
+`head_object_grasp` 默认订阅该话题；在采集、预检、接近或下降阶段收到 `true` 后，
+会先保持当前关节/末端位置，丢弃旧目标并重新采集稳定位姿，再按新位置规划。
+闭合夹爪和抬升阶段忽略该通知。可通过 `options.object-pose-change-topic` 修改话题，
+传空字符串可禁用该功能。
+
 已提供同样参数的任务文件 `agent_tools/head_object_grasp_task.json`，可先预览，再实际执行：
 
 ```bash

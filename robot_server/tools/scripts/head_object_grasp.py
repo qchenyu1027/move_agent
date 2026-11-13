@@ -11,6 +11,11 @@
 
 使用 ``--position-only`` 时，水瓶姿态不参与目标计算和稳定性判定，
 工具保持进入执行阶段时的当前姿态，只移动到水瓶位置。
+
+视觉程序在物体位置明显变化时会发布 ``/object_pose_changed``（std_msgs/Bool）。
+本脚本在采集、预检、接近或下降阶段收到该通知后，会先以当前反馈保持位姿，
+丢弃已冻结的物体位姿，再按新的稳定位置重新规划和执行；闭合夹爪和抬升阶段
+忽略该通知，避免把机器人自身移动水瓶误判为物体被挪动。
 """
 
 import argparse
@@ -33,7 +38,8 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
-from std_msgs.msg import Empty, Float32, Float32MultiArray, Int16MultiArray, Int32, Int32MultiArray
+from std_msgs.msg import (Bool, Empty, Float32, Float32MultiArray, Int16MultiArray, Int32,
+                          Int32MultiArray)
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from left_tool_accuracy_test import (angular_error_deg, multiply_quaternions,
@@ -123,6 +129,9 @@ def parse_args(argv=None):
                         help='头部视觉输出的 geometry_msgs/PoseStamped 话题')
     parser.add_argument('--pose-request-topic',
                         help='可选：进入采集阶段时向视觉程序发送一次 std_msgs/Empty 请求')
+    parser.add_argument('--object-pose-change-topic', default='/object_pose_changed',
+                        help=('物体位置变化通知话题，消息类型为 std_msgs/Bool；'
+                              '运动阶段收到后中断并按新位置重新采集，空字符串表示禁用'))
     parser.add_argument('--execute', action='store_true', help='预检完成后执行；默认只预览')
     parser.add_argument('--position-only', action='store_true',
                         help='只移动到物体位置；忽略水瓶姿态并保持当前工具姿态')
@@ -262,6 +271,9 @@ class HeadObjectGrasp(Node):
         # VLAHost 的 EEF 请求要求左右手同时提供目标。未选中手只在第一
         # 次动作前读取一次，后续始终使用该值，避免其目标随反馈漂移。
         self.http_hold_pose = None
+        # 中断后重新采集期间发送的 EEF / 关节保持位姿。
+        self.interrupt_hold = None
+        self.interrupt_joint_hold = None
         self.side = args.side
         self.label = '左' if args.side == 'left' else '右'
         self.index = 0 if args.side == 'left' else 1
@@ -274,6 +286,7 @@ class HeadObjectGrasp(Node):
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
         self.pending_pose = None
+        self.pose_change_pending = False
         self.last_pose_stamp = None
         self.samples = deque(maxlen=args.stable_samples)
         self.object_pose = None
@@ -313,6 +326,9 @@ class HeadObjectGrasp(Node):
         self.gripper_topic = topic_name(args.namespace, f'control/gripperValue{"L" if self.index == 0 else "R"}')
         self.create_subscription(PoseStamped, args.object_pose_topic,
                                  self.on_pose, qos_profile_sensor_data)
+        if args.object_pose_change_topic:
+            self.create_subscription(Bool, args.object_pose_change_topic,
+                                     self.on_pose_change, 10)
         self.pose_request = (self.create_publisher(Empty, args.pose_request_topic,
                                                    qos_profile_sensor_data)
                              if args.pose_request_topic else None)
@@ -357,6 +373,11 @@ class HeadObjectGrasp(Node):
     def on_pose(self, msg):
         if self.phase == 'capture':
             self.pending_pose = msg
+
+    def on_pose_change(self, msg):
+        """记录视觉程序的位置变化通知，由 tick 在运动阶段安全处理。"""
+        if msg.data:
+            self.pose_change_pending = True
 
     def on_state(self, msg):
         self.states = tuple(msg.data)
@@ -428,6 +449,95 @@ class HeadObjectGrasp(Node):
             self.get_logger().warning(f'等待有效头部物体位姿 / 相机 TF：{error}',
                                       throttle_duration_sec=1.0)
 
+    def hold_current(self):
+        """中断时立即以当前反馈作为保持目标，避免继续执行旧的运动目标。"""
+        if self.http_mode:
+            try:
+                actual, quaternion = self.actual()
+            except (ValueError, TransformException) as error:
+                self.get_logger().warning(f'中断时无法读取当前 EEF 位姿：{error}')
+                return
+            self.target, self.target_quaternion = actual, normalize(quaternion)
+            self.interrupt_hold = (self.target, self.target_quaternion)
+            try:
+                self.http_publish(0.0)
+            except ValueError as error:
+                self.get_logger().warning(f'中断时发送 EEF 保持目标失败：{error}')
+            return
+        if self.joint_mode and self.user_joint_hold is not None:
+            try:
+                current = self.feedback_configuration()
+            except ValueError as error:
+                self.get_logger().warning(f'中断时无法读取关节反馈：{error}')
+                return
+            self.interrupt_joint_hold = list(current)
+            self.user_joint_hold = list(current)
+            self.user_joint_target = list(current)
+            self.publish_user_joint(self.user_joint_target)
+            return
+        if self.publisher is not None:
+            self.publish_request(False)
+
+    def keep_hold(self):
+        """重新采集位姿期间持续保持中断时的位姿，防止旧目标继续执行。"""
+        if self.http_mode:
+            if self.http_session_enabled and self.interrupt_hold is not None:
+                try:
+                    self.http_publish(0.0, *self.interrupt_hold)
+                except ValueError as error:
+                    self.get_logger().warning(
+                        f'保持 VLAHost EEF 位姿失败：{error}', throttle_duration_sec=1.0)
+            return
+        if self.joint_mode and self.interrupt_joint_hold is not None:
+            if self.joint_source != USER_JOINT_SOURCE:
+                return
+            try:
+                self.publish_user_joint(self.interrupt_joint_hold)
+            except ValueError as error:
+                self.get_logger().warning(
+                    f'保持关节位姿失败：{error}', throttle_duration_sec=1.0)
+
+    def restart_capture(self, now):
+        """丢弃已冻结的物体位姿，回到采集阶段等待新的稳定位置。"""
+        self.phase = 'capture'
+        self.phase_started = now
+        self.started = now
+        self.motion_started = None
+        self.object_pose = None
+        self.object_frozen_at = None
+        self.samples.clear()
+        self.pending_pose = None
+        self.target = None
+        self.target_quaternion = None
+        self.grasp_position = None
+        self.intermediate_position = None
+        self.approach_position = None
+        self.lift_position = None
+        self.initial_position = None
+        self.settled_since = None
+        self.intermediate_reached = False
+        self.last_pose_request_at = None
+
+    def handle_pose_change(self, now):
+        """物体被挪动后停止当前目标，并按新位置重新采集和规划。"""
+        if self.phase == 'capture':
+            # 采集阶段本来就是等待稳定位姿；立即丢弃移动前的样本并重新请求。
+            self.samples.clear()
+            self.started = now
+            self.last_pose_request_at = None
+            self.get_logger().info('收到物体位置变化通知，重新开始稳定位姿采集')
+            return
+        if self.phase in ('closing', 'lift'):
+            self.get_logger().warning(
+                f'{self.phase} 阶段忽略物体位置变化通知；'
+                '闭合夹爪或抬升时物体随机械臂移动')
+            return
+        self.hold_current()
+        self.get_logger().warning(
+            f'{self.phase} 阶段收到物体位置变化通知，中断当前目标，'
+            '按新位置重新采集和规划')
+        self.restart_capture(now)
+
     def actual(self):
         if getattr(self, 'http_mode', False):
             state = self.http_state_read()
@@ -480,7 +590,7 @@ class HeadObjectGrasp(Node):
         elif time.monotonic() - self.http_last_session_at >= 1.0:
             self.http_session(True)
 
-    def http_publish(self, gripper_value):
+    def http_publish(self, gripper_value, target=None, quaternion=None):
         now = time.monotonic()
         if now - self.http_last_action_at < 1.0 / self.args.http_action_hz:
             return
@@ -493,7 +603,8 @@ class HeadObjectGrasp(Node):
             self.get_logger().info(
                 f'HTTP 固定未选中手初始 EEF：'
                 f'{"right" if self.index == 0 else "left"}={self.http_hold_pose}')
-        target_pose = list(self.target) + list(self.target_quaternion)
+        target_pose = list(self.target if target is None else target) + list(
+            self.target_quaternion if quaternion is None else quaternion)
         if self.index == 0:
             left = target_pose
             right = list(self.http_hold_pose)
@@ -852,6 +963,10 @@ class HeadObjectGrasp(Node):
         if self.exit_code is not None:
             return
         now = time.monotonic()
+        # 物体被挪动时先停止当前目标，再按新位置重新采集和规划。
+        if getattr(self, 'pose_change_pending', False):
+            self.pose_change_pending = False
+            self.handle_pose_change(now)
         # reach-only 的两段运动共用一个截止时间，防止进入 descend 后重新计时。
         if (self.args.reach_only and self.motion_started is not None and
                 now - self.motion_started >= self.args.motion_timeout):
@@ -859,6 +974,8 @@ class HeadObjectGrasp(Node):
                            f'停在 {self.phase} 阶段，停止后续任务')
             return
         if self.phase == 'capture':
+            # 中断后重新采集期间继续发送保持目标，避免旧的运动目标继续执行。
+            self.keep_hold()
             request_due = (self.last_pose_request_at is None or
                            now - self.last_pose_request_at >= self.args.pose_request_interval)
             if (self.pose_request is not None and request_due and

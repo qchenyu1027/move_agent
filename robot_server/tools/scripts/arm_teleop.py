@@ -6,7 +6,7 @@ from pathlib import Path
 import runpy
 
 
-ROOT_SCRIPT = Path(__file__).resolve().with_name('right_arm_teleop.py')
+ROOT_SCRIPT = Path(__file__).resolve().parents[4] / 'right_arm_teleop.py'
 
 
 def main():

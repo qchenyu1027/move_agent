@@ -28,6 +28,7 @@
     "grasp_offset_mm": [0, 0, -40],
     "options": {
       "capture-timeout": 45,
+      "object-pose-change-topic": "/object_pose_changed",
       "pose-request-interval": 1,
       "motion-timeout": 15,
       "model-xml": "/home/liuqian/copy/Apex_Deploy/robot_node/marvin_description/mjcf/Gento_Luna/Gento_Luna.xml",
@@ -60,7 +61,7 @@
       "control-backend": "auto",
       "move-z-mm": 50,
       "once-timeout-s": 30,
-      "once-tolerance-mm": 8,
+      "once-tolerance-mm": 20,
       "once-settle-s": 0.3
     }
   },
@@ -75,7 +76,7 @@
       "control-backend": "auto",
       "move-z-mm": -50,
       "once-timeout-s": 30,
-      "once-tolerance-mm": 8,
+      "once-tolerance-mm": 20,
       "once-settle-s": 0.3
     }
   },
